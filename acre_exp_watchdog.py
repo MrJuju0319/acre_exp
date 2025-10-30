@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-ACRE SPC42 → MQTT watchdog
+ACRE SPC42 → MQTT watchdog (corrected)
 """
 
 import os
@@ -268,40 +268,65 @@ class SPCClient:
         slug = re.sub(r"[^a-zA-Z0-9]+", "_", name or "").strip("_").lower()
         return slug or "unknown"
 
-    def _parse_status_page(self, html: str) -> Dict[str, list]:
+    def parse_zones(self, html: str) -> list:
+        """Parse the 'status_zones' page to extract zone information."""
         soup = BeautifulSoup(html, "html.parser")
+        grid = soup.find("table", {"class": "gridtable"})
         zones = []
-        table = soup.find("table", {"class": "gridtable"})
-        if table:
-            for tr in table.find_all("tr"):
-                tds = tr.find_all("td")
-                if len(tds) >= 6:
-                    zname = tds[0].get_text(strip=True)
-                    sect = tds[1].get_text(strip=True)
-                    etat_txt = tds[5].get_text(strip=True)
-                    if zname:
-                        zones.append({"zname": zname, "sect": sect, "etat_txt": etat_txt})
+        if not grid:
+            return zones
+        for tr in grid.find_all("tr"):
+            tds = tr.find_all("td")
+            if len(tds) >= 6:
+                zname = tds[0].get_text(strip=True)
+                sect = tds[1].get_text(strip=True)
+                etat_txt = tds[5].get_text(strip=True)
+                if zname:
+                    zones.append({"zname": zname, "sect": sect, "etat_txt": etat_txt})
+        return zones
+
+    def parse_areas(self, html: str) -> list:
+        """Parse the 'spc_home' page to extract area/sector information."""
+        soup = BeautifulSoup(html, "html.parser")
         areas = []
         for tr in soup.find_all("tr"):
             tds = tr.find_all("td")
-            if len(tds) >= 3:
-                label = tds[1].get_text(strip=True)
-                state = tds[2].get_text(strip=True)
-                if label.lower().startswith("secteur"):
-                    m = re.match(r"^Secteur\s+(\d+)\s*:\s*(.+)$", label, re.I)
-                    if m:
-                        num, nom = m.groups()
-                        areas.append({"sid": num, "nom": nom, "etat_txt": state})
-        return {"zones": zones, "areas": areas}
+            if len(tds) < 3:
+                continue
+            label = tds[1].get_text(strip=True)
+            state = tds[2].get_text(strip=True)
+            if label.lower().startswith("secteur"):
+                m = re.match(r"^Secteur\s+(\d+)\s*:\s*(.+)$", label, re.I)
+                if m:
+                    num, nom = m.groups()
+                    areas.append({"sid": num, "nom": nom, "etat_txt": state})
+        return areas
 
     def fetch(self) -> dict:
+        """
+        Fetch the current zones and areas from the SPC controller.
+
+        This method uses the same session ID to request both the
+        ``status_zones`` page (for zones) and ``spc_home`` (for
+        sectors/areas) to ensure we get complete information without
+        forcing a new login.  It keeps the existing session alive
+        and only falls back to a re-login if the session becomes
+        invalid.
+        """
         sid = self.get_or_login()
         if not sid:
             return {"zones": [], "areas": []}
-        url = f"{self.host}/secure.htm?session={sid}&page=controller_status"
-        html = self._get(url).text
+        # Request zones from status_zones
+        url_zones = f"{self.host}/secure.htm?session={sid}&page=status_zones"
+        z_html = self._get(url_zones).text
+        # Request areas from spc_home
+        url_areas = f"{self.host}/secure.htm?session={sid}&page=spc_home"
+        a_html = self._get(url_areas).text
         self._save_cookies()
-        return self._parse_status_page(html)
+        return {
+            "zones": self.parse_zones(z_html),
+            "areas": self.parse_areas(a_html),
+        }
 
 
 # --- MQTT wrapper ---
