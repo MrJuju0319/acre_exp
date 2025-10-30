@@ -2,32 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-ACRE SPC42 → MQTT watchdog (corrected)
-
-This version addresses the issue of repeated login events from the SPC
-controller by ensuring that the session ID and cookies are persisted and
-reused across polls.  It also introduces a simple lock mechanism so that
-only one watchdog instance runs at a time (preventing two processes from
-invalidating each other’s sessions) and uses an exponential back‑off
-strategy with jitter to avoid hammering the controller when login fails.
-
-Key changes:
-
-* **Persistent session and cookies** saved atomically with file locks.
-* **Robust session validation**: we only log in again if the controller
-  redirects us to ``login.htm``.  This matches the behaviour observed in
-  your packet capture.
-* **Exponential back‑off and jitter** applied when logins fail or occur too
-  frequently, preventing stormy login loops.
-* **Single instance lock** using ``/var/run/acre_exp.lock`` to avoid
-  concurrent watchdogs stepping on each other.
-* **MQTT Last Will and Testament** (LWT) publishes ``online``/``offline``
-  status for the watchdog so you know if it crashes.
-
-Additionally, the watchdog now fetches both zones and area statuses in a
-single request to ``controller_status`` rather than two separate requests
-(``status_zones`` and ``spc_home``).  This reduces load on the controller.
-
+ACRE SPC42 → MQTT watchdog
 """
 
 import os
@@ -362,11 +337,19 @@ class MQ:
 
         self.connected = False
         if HAS_V2:
+            # Paho MQTT v2.x uses five-argument callbacks:
+            # on_connect(client, userdata, flags, reason_code, properties)
+            # on_disconnect(client, userdata, flags, reason_code, properties)
             def _on_connect(c, u, flags, rc, properties=None):
+                # rc is the reason code in v2
                 self._set_conn(rc)
-            def _on_disconnect(c, u, rc, properties=None):
+            def _on_disconnect(c, u, flags, rc, properties=None):
+                # Unset the connection on disconnect; flags is unused
                 self._unset_conn()
         else:
+            # Paho MQTT v1.x uses older three/four‑argument callbacks:
+            # on_connect(client, userdata, flags, rc)
+            # on_disconnect(client, userdata, rc)
             def _on_connect(c, u, flags, rc):
                 self._set_conn(rc)
             def _on_disconnect(c, u, rc):
