@@ -1,13 +1,40 @@
 #!/opt/spc-venv/bin/python3
 # -*- coding: utf-8 -*-
 
-import os, re, sys, json, time, pathlib, argparse
+import os, re, sys, json, time, pathlib, argparse, tempfile, fcntl, contextlib, random
 from urllib.parse import urljoin
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 from http.cookiejar import MozillaCookieJar
 import yaml
+import atexit
 
+# ---------- Utils fichiers sûrs ----------
+@contextlib.contextmanager
+def locked_file(path, mode="r+"):
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(fd, mode) as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield f
+        finally:
+            f.flush()
+            os.fsync(f.fileno())
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+def atomic_write(path, data_bytes: bytes, mode=0o600):
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".tmp_", dir=d)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data_bytes)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    os.chmod(path, mode)
+
+# ---------- Chargement YAML ----------
 def load_cfg(path: str):
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
@@ -15,6 +42,7 @@ def load_cfg(path: str):
 def ensure_dir(p):
     pathlib.Path(p).mkdir(parents=True, exist_ok=True)
 
+# ---------- Client SPC ----------
 class SPCClient:
     def __init__(self, cfg: dict):
         spc = cfg.get("spc", {})
@@ -30,8 +58,19 @@ class SPCClient:
         self.cookie_file  = os.path.join(self.cache, "spc_cookies.jar")
 
         self.session = requests.Session()
+        retry = Retry(
+            total=3, backoff_factor=0.5,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset(["GET", "POST"])
+        )
+        adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=20)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+        self.session.headers.update({"Connection": "keep-alive", "User-Agent": "spc42-client/1.0"})
+
         self.cookiejar = MozillaCookieJar(self.cookie_file)
         self._load_cookies()
+        atexit.register(self._save_cookies)
 
     # --- cookies
     def _load_cookies(self):
@@ -46,7 +85,10 @@ class SPCClient:
 
     def _save_cookies(self):
         try:
-            self.cookiejar.save(ignore_discard=True, ignore_expires=True)
+            tmp = self.cookie_file + ".tmp"
+            self.cookiejar.save(tmp, ignore_discard=True, ignore_expires=True)
+            os.replace(tmp, self.cookie_file)
+            os.chmod(self.cookie_file, 0o600)
         except Exception:
             pass
 
@@ -54,12 +96,14 @@ class SPCClient:
     def _get(self, url):
         r = self.session.get(url, timeout=8)
         r.raise_for_status()
+        self._save_cookies()  # opportuniste
         r.encoding = "utf-8"
         return r
 
     def _post(self, url, data, allow_redirects=True):
         r = self.session.post(url, data=data, allow_redirects=allow_redirects, timeout=8)
         r.raise_for_status()
+        self._save_cookies()  # opportuniste
         r.encoding = "utf-8"
         return r
 
@@ -68,22 +112,23 @@ class SPCClient:
         if not os.path.exists(self.session_file):
             return {}
         try:
-            with open(self.session_file, "r", encoding="utf-8") as f:
+            with locked_file(self.session_file, "r") as f:
                 return json.load(f)
         except Exception:
             return {}
 
     def _save_session_cache(self, sid):
-        try:
-            with open(self.session_file, "w", encoding="utf-8") as f:
-                json.dump({"session": sid, "time": time.time()}, f)
-        except Exception:
-            pass
+        if not sid:
+            return
+        payload = {"host": self.host, "session": sid, "time": time.time()}
+        atomic_write(self.session_file, json.dumps(payload).encode("utf-8"))
 
     def _last_login_too_recent(self):
         d = self._load_session_cache()
-        t = d.get("time", 0)
-        return (time.time() - float(t)) < self.min_login_interval
+        t = float(d.get("time", 0))
+        base = self.min_login_interval
+        jitter = random.uniform(0, base * 0.2)
+        return (time.time() - t) < (base + jitter)
 
     @staticmethod
     def _extract_session(text_or_url):
@@ -127,6 +172,12 @@ class SPCClient:
         sid = d.get("session", "")
         if sid and self._session_valid(sid):
             return sid
+
+        # double-check avant relogin (évite faux négatifs)
+        if sid and not self._last_login_too_recent():
+            time.sleep(1.0)
+            if self._session_valid(sid):
+                return sid
 
         if self._last_login_too_recent():
             time.sleep(2)
