@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 
 import os, re, sys, json, time, pathlib, argparse
-from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 from http.cookiejar import MozillaCookieJar
+from urllib.parse import urljoin
 import yaml
 
 def load_cfg(path: str):
@@ -31,7 +31,6 @@ class SPCClient:
         self.cookie_file  = os.path.join(self.cache, "spc_cookies.jar")
 
         self.session = requests.Session()
-        # headers “navigateur” pour éviter des comportements différents
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                           "(KHTML, like Gecko) Chrome/118.0 Safari/537.36",
@@ -57,7 +56,7 @@ class SPCClient:
         except Exception:
             pass
 
-    # --- http (avec referer pour secure.htm)
+    # --- http
     def _get(self, url, referer=None):
         headers = {}
         if referer:
@@ -109,15 +108,21 @@ class SPCClient:
         return m.group(1) if m else ""
 
     @staticmethod
-    def _looks_like_login_page(html: str) -> bool:
-        low = html.lower()
-        return ("login.htm" in low) or ("mot de passe" in low) or ("identifiant" in low)
+    def _is_login_response(resp_text: str, resp_url: str, expect_table: bool) -> bool:
+        # vrai login si URL login.htm, ou si formulaire userid/password détecté
+        if resp_url and "login.htm" in resp_url.lower():
+            return True
+        if not expect_table:
+            return False
+        low = resp_text.lower()
+        has_user = ('name="userid"' in low) or ('id="userid"' in low) or ("id='userid'" in low)
+        has_pass = ('name="password"' in low) or ('id="password"' in low) or ("id='password'" in low)
+        return has_user and has_pass
 
     def _do_login(self):
         if self.debug:
             print("[DEBUG] Performing login…")
         try:
-            # amorce de session
             self._get(urljoin(self.host, "/login.htm"))
         except Exception:
             pass
@@ -135,10 +140,8 @@ class SPCClient:
     def get_or_login(self):
         d = self._load_session_cache()
         sid = d.get("session", "")
-        # ⚠️ CHANGEMENT: on fait CONFIANCE au SID. Pas de validation agressive.
         if sid:
             return sid
-        # sinon seulement, login
         return self._do_login()
 
     # --- parsing helpers
@@ -167,10 +170,6 @@ class SPCClient:
 
     @staticmethod
     def _extract_state_text(td):
-        """
-        Certaines versions affichent un pictogramme (img) au lieu d'un texte.
-        On tente: texte > img[alt] > img[title]
-        """
         txt = td.get_text(strip=True)
         if txt:
             return txt
@@ -233,34 +232,49 @@ class SPCClient:
         if not sid:
             return {"error": "Impossible d’obtenir une session"}
 
-        def _secure(url_page: str):
-            url = f"{self.host}/secure.htm?session={sid}&page={url_page}"
+        def _fetch(page: str):
+            url = f"{self.host}/secure.htm?session={sid}&page={page}"
             r = self._get(url, referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
-            # si on retombe sur un login, relogin (une fois)
-            if self._looks_like_login_page(r.text):
-                if self.debug:
-                    print("[DEBUG] Looks like login page returned during fetch — re-login")
-                new_sid = self._do_login()
-                if not new_sid:
-                    return "", None
-                url2 = f"{self.host}/secure.htm?session={new_sid}&page={url_page}"
-                r = self._get(url2, referer=f"{self.host}/secure.htm?session={new_sid}&page=spc_home")
-                self._save_cookies()
-                self._save_session_cache(new_sid)
-                return new_sid, r
             return sid, r
 
-        sid, z_resp = _secure("status_zones")
-        if not z_resp:
-            return {"zones": [], "areas": []}
-        zones  = self.parse_zones(z_resp.text)
+        # ZONES
+        sid, r_z = _fetch("status_zones")
+        if self.debug:
+            print(f"[DEBUG] Requesting zones from: {r_z.url}")
+            print(f"[DEBUG] zones page length: {len(r_z.text)} bytes")
+        zones = self.parse_zones(r_z.text)
+        if len(zones) == 0 and self._is_login_response(r_z.text, getattr(r_z, "url", ""), True):
+            if self.debug:
+                print("[DEBUG] Zones parse empty + looks like login — re-login once")
+            new_sid = self._do_login()
+            if new_sid:
+                sid = new_sid
+                url = f"{self.host}/secure.htm?session={sid}&page=status_zones"
+                r_z = self._get(url, referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
+                zones = self.parse_zones(r_z.text)
+                if self.debug:
+                    print(f"[DEBUG] zones retry length: {len(r_z.text)} bytes — parsed: {len(zones)}")
 
-        sid, a_resp = _secure("spc_home")
-        if not a_resp:
-            return {"zones": zones, "areas": []}
-        areas  = self.parse_areas(a_resp.text)
+        # AREAS
+        sid, r_a = _fetch("spc_home")
+        if self.debug:
+            print(f"[DEBUG] Requesting areas from: {r_a.url}")
+            print(f"[DEBUG] areas page length: {len(r_a.text)} bytes")
+        areas = self.parse_areas(r_a.text)
+        if len(areas) == 0 and self._is_login_response(r_a.text, getattr(r_a, "url", ""), True):
+            if self.debug:
+                print("[DEBUG] Areas parse empty + looks like login — re-login once")
+            new_sid = self._do_login()
+            if new_sid:
+                sid = new_sid
+                url = f"{self.host}/secure.htm?session={sid}&page=spc_home"
+                r_a = self._get(url, referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
+                areas = self.parse_areas(r_a.text)
+                if self.debug:
+                    print(f"[DEBUG] areas retry length: {len(r_a.text)} bytes — parsed: {len(areas)}")
 
         self._save_cookies()
+        self._save_session_cache(sid)
         return {"zones": zones, "areas": areas}
 
 
