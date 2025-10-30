@@ -1,20 +1,52 @@
 #!/opt/spc-venv/bin/python3
 # -*- coding: utf-8 -*-
 
-import os, re, sys, time, json, argparse, signal
+import os, re, sys, time, json, argparse, signal, tempfile, fcntl, contextlib, random
 import yaml
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 from http.cookiejar import MozillaCookieJar
 from typing import Dict
+import atexit
 
+# --- MQTT (compat v1/v2) ---
 try:
     from paho.mqtt import client as mqtt
+    try:
+        from paho.mqtt.client import CallbackAPIVersion
+        HAS_V2 = True
+    except Exception:
+        HAS_V2 = False
 except Exception:
     print("[ERREUR] paho-mqtt non installé : /opt/spc-venv/bin/pip install paho-mqtt")
     sys.exit(1)
 
-# --------- Chargement YAML ----------
+# ---------- Utils fichiers sûrs ----------
+@contextlib.contextmanager
+def locked_file(path, mode="r+"):
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(fd, mode) as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield f
+        finally:
+            f.flush()
+            os.fsync(f.fileno())
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+def atomic_write(path, data_bytes: bytes, mode=0o600):
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".tmp_", dir=d)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data_bytes)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    os.chmod(path, mode)
+
+# ---------- Chargement YAML ----------
 def load_cfg(path: str):
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
@@ -23,7 +55,7 @@ def ensure_dir(p):
     import pathlib
     pathlib.Path(p).mkdir(parents=True, exist_ok=True)
 
-# --------- Client SPC (identique logique que le status) ----------
+# ---------- Client SPC (tokens robustes) ----------
 class SPCClient:
     def __init__(self, cfg: dict):
         spc = cfg.get("spc", {})
@@ -39,8 +71,19 @@ class SPCClient:
         self.cookie_file  = os.path.join(self.cache, "spc_cookies.jar")
 
         self.session = requests.Session()
+        retry = Retry(
+            total=3, backoff_factor=0.5,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset(["GET","POST"])
+        )
+        adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=20)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+        self.session.headers.update({"Connection":"keep-alive","User-Agent":"spc42-client/1.0"})
+
         self.cookiejar = MozillaCookieJar(self.cookie_file)
         self._load_cookies()
+        atexit.register(self._save_cookies)
 
     def _load_cookies(self):
         try:
@@ -55,19 +98,24 @@ class SPCClient:
 
     def _save_cookies(self):
         try:
-            self.cookiejar.save(ignore_discard=True, ignore_expires=True)
+            tmp = self.cookie_file + ".tmp"
+            self.cookiejar.save(tmp, ignore_discard=True, ignore_expires=True)
+            os.replace(tmp, self.cookie_file)
+            os.chmod(self.cookie_file, 0o600)
         except Exception:
             pass
 
     def _get(self, url):
         r = self.session.get(url, timeout=8)
         r.raise_for_status()
+        self._save_cookies()
         r.encoding = "utf-8"
         return r
 
     def _post(self, url, data, allow_redirects=True):
         r = self.session.post(url, data=data, allow_redirects=allow_redirects, timeout=8)
         r.raise_for_status()
+        self._save_cookies()
         r.encoding = "utf-8"
         return r
 
@@ -75,22 +123,22 @@ class SPCClient:
         if not os.path.exists(self.session_file):
             return {}
         try:
-            with open(self.session_file, "r", encoding="utf-8") as f:
+            with locked_file(self.session_file, "r") as f:
                 return json.load(f)
         except Exception:
             return {}
 
     def _save_session_cache(self, sid):
-        try:
-            with open(self.session_file, "w", encoding="utf-8") as f:
-                json.dump({"session": sid, "time": time.time()}, f)
-        except Exception:
-            pass
+        if not sid: return
+        payload = {"host": self.host, "session": sid, "time": time.time()}
+        atomic_write(self.session_file, json.dumps(payload).encode("utf-8"))
 
     def _last_login_too_recent(self):
         d = self._load_session_cache()
-        t = d.get("time", 0)
-        return (time.time() - float(t)) < self.min_login_interval
+        t = float(d.get("time", 0))
+        base = self.min_login_interval
+        jitter = random.uniform(0, base*0.2)
+        return (time.time() - t) < (base + jitter)
 
     @staticmethod
     def _extract_session(text_or_url):
@@ -134,6 +182,13 @@ class SPCClient:
         sid = d.get("session", "")
         if sid and self._session_valid(sid):
             return sid
+
+        # double-check avant relogin (évite faux négatifs)
+        if sid and not self._last_login_too_recent():
+            time.sleep(1.0)
+            if self._session_valid(sid):
+                return sid
+
         if self._last_login_too_recent():
             time.sleep(2)
             if sid and self._session_valid(sid):
@@ -201,12 +256,9 @@ class SPCClient:
         z_html = self._get(f"{self.host}/secure.htm?session={sid}&page=status_zones").text
         a_html = self._get(f"{self.host}/secure.htm?session={sid}&page=spc_home").text
         self._save_cookies()
-        return {
-            "zones": self.parse_zones(z_html),
-            "areas": self.parse_areas(a_html)
-        }
+        return {"zones": self.parse_zones(z_html), "areas": self.parse_areas(a_html)}
 
-# --------- MQTT ----------
+# ---------- MQTT ----------
 class MQ:
     def __init__(self, cfg: dict):
         m = cfg.get("mqtt", {})
@@ -219,16 +271,38 @@ class MQ:
         self.retain = bool(m.get("retain", True))
         self.client_id = m.get("client_id", "spc42-watchdog")
 
-        self.client = mqtt.Client(client_id=self.client_id, clean_session=True, userdata=None, protocol=mqtt.MQTTv311)
+        if HAS_V2:
+            self.client = mqtt.Client(
+                callback_api_version=CallbackAPIVersion.VERSION2,
+                client_id=self.client_id,
+                protocol=mqtt.MQTTv311,
+                transport="tcp",
+            )
+        else:
+            self.client = mqtt.Client(client_id=self.client_id, clean_session=True, userdata=None, protocol=mqtt.MQTTv311)
+
         if self.user:
             self.client.username_pw_set(self.user, self.pwd)
+
+        # LWT online/offline
+        self.lwt_topic = f"{self.base}/status"
+        self.client.will_set(self.lwt_topic, payload="offline", qos=self.qos, retain=True)
+
         self.connected = False
-        self.client.on_connect = lambda c,u,f,rc: self._set_conn(rc)
-        self.client.on_disconnect = lambda c,u,rc: self._unset_conn()
+        if HAS_V2:
+            def _on_connect(c, u, flags, rc, properties=None): self._set_conn(rc)
+            def _on_disconnect(c, u, rc, properties=None): self._unset_conn()
+        else:
+            def _on_connect(c, u, flags, rc): self._set_conn(rc)
+            def _on_disconnect(c, u, rc): self._unset_conn()
+        self.client.on_connect = _on_connect
+        self.client.on_disconnect = _on_disconnect
 
     def _set_conn(self, rc):
         self.connected = (rc == 0)
         print("[MQTT] Connecté" if self.connected else f"[MQTT] Connexion échouée rc={rc}")
+        if self.connected:
+            self.pub("status", "online")
 
     def _unset_conn(self):
         self.connected = False
@@ -253,7 +327,7 @@ class MQ:
         except Exception as e:
             print(f"[MQTT] publish ERR {full}: {e}")
 
-# --------- Main loop ----------
+# ---------- Main loop ----------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-c", "--config", default="/etc/acre_exp/config.yml")
@@ -280,7 +354,7 @@ def main():
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
 
-    # Init publish (state current)
+    # Snapshot initial
     snap = spc.fetch()
     for z in snap["zones"]:
         zid = spc.zone_id_from_name(z["zname"])
@@ -301,7 +375,6 @@ def main():
 
     print("[SPC→MQTT] État initial publié.")
 
-    # Loop
     while running:
         tick = time.strftime("%H:%M:%S")
         try:
