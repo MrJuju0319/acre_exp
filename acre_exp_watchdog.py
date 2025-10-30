@@ -8,9 +8,13 @@ from bs4 import BeautifulSoup
 from http.cookiejar import MozillaCookieJar
 from typing import Dict, Optional
 
-# MQTT compatible v1/v2 (évite l’erreur d’args)
 try:
     from paho.mqtt import client as mqtt
+    try:
+        from paho.mqtt.client import CallbackAPIVersion
+        HAVE_V5 = True
+    except Exception:
+        HAVE_V5 = False
 except Exception:
     print("[ERREUR] paho-mqtt non installé : /opt/spc-venv/bin/pip install paho-mqtt")
     sys.exit(1)
@@ -47,6 +51,7 @@ class SPCClient:
         self.cookiejar = MozillaCookieJar(self.cookie_file)
         self._load_cookies()
 
+    # --- cookies
     def _load_cookies(self):
         try:
             if os.path.exists(self.cookie_file):
@@ -64,6 +69,7 @@ class SPCClient:
         except Exception:
             pass
 
+    # --- http
     def _get(self, url, referer=None):
         headers = {}
         if referer:
@@ -82,6 +88,7 @@ class SPCClient:
         r.encoding = "utf-8"
         return r
 
+    # --- session cache
     def _load_session_cache(self):
         if not os.path.exists(self.session_file):
             return {}
@@ -98,11 +105,6 @@ class SPCClient:
         except Exception:
             pass
 
-    def _last_login_too_recent(self):
-        d = self._load_session_cache()
-        t = d.get("time", 0)
-        return (time.time() - float(t)) < self.min_login_interval
-
     @staticmethod
     def _extract_session(text_or_url):
         if not text_or_url:
@@ -114,9 +116,15 @@ class SPCClient:
         return m.group(1) if m else ""
 
     @staticmethod
-    def _looks_like_login_page(html: str) -> bool:
-        low = html.lower()
-        return ("login.htm" in low) or ("mot de passe" in low) or ("identifiant" in low)
+    def _is_login_response(resp_text: str, resp_url: str, expect_table: bool) -> bool:
+        if resp_url and "login.htm" in resp_url.lower():
+            return True
+        if not expect_table:
+            return False
+        low = resp_text.lower()
+        has_user = ('name="userid"' in low) or ('id="userid"' in low) or ("id='userid'" in low)
+        has_pass = ('name="password"' in low) or ('id="password"' in low) or ("id='password'" in low)
+        return has_user and has_pass
 
     def _do_login(self) -> str:
         if self.debug:
@@ -143,6 +151,7 @@ class SPCClient:
             return sid
         return self._do_login()
 
+    # --- parsing helpers
     @staticmethod
     def zone_bin(etat_txt: str) -> int:
         s = (etat_txt or "").lower()
@@ -216,7 +225,7 @@ class SPCClient:
         if not sid:
             return {"zones": [], "areas": []}
 
-        def _secure(page: str) -> (str, Optional[requests.Response]):
+        def _fetch(page: str):
             url = f"{self.host}/secure.htm?session={sid}&page={page}"
             if self.debug:
                 print(f"[DEBUG] Using SID={sid}")
@@ -224,40 +233,48 @@ class SPCClient:
             r = self._get(url, referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
             if self.debug:
                 print(f"[DEBUG] {page} page length: {len(r.text)} bytes")
-            if self._looks_like_login_page(r.text):
-                if self.debug:
-                    print("[DEBUG] Looks like login page — re-login")
-                new_sid = self._do_login()
-                if not new_sid:
-                    return "", None
-                url2 = f"{self.host}/secure.htm?session={new_sid}&page={page}"
-                r = self._get(url2, referer=f"{self.host}/secure.htm?session={new_sid}&page=spc_home")
-                if self.debug:
-                    print(f"[DEBUG] {page} retry length: {len(r.text)} bytes")
-                self._save_cookies()
-                self._save_session_cache(new_sid)
-                return new_sid, r
             return sid, r
 
-        sid, z = _secure("status_zones")
-        if not z:
-            return {"zones": [], "areas": []}
-        zones = self.parse_zones(z.text)
+        # ZONES
+        sid, r_z = _fetch("status_zones")
+        zones = self.parse_zones(r_z.text)
         if self.debug:
             print(f"[DEBUG] Parsed zones count: {len(zones)}")
-            if zones:
-                print(f"[DEBUG] First zone: {zones[0]}")
+            if zones: print(f"[DEBUG] First zone: {zones[0]}")
+        if len(zones) == 0 and self._is_login_response(r_z.text, getattr(r_z, "url", ""), True):
+            if self.debug:
+                print("[DEBUG] Zones parse empty + looks like login — re-login once")
+            new_sid = self._do_login()
+            if new_sid:
+                sid = new_sid
+                url = f"{self.host}/secure.htm?session={sid}&page=status_zones"
+                r_z = self._get(url, referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
+                zones = self.parse_zones(r_z.text)
+                if self.debug:
+                    print(f"[DEBUG] status_zones retry length: {len(r_z.text)} bytes")
+                    print(f"[DEBUG] Parsed zones after relogin: {len(zones)}")
 
-        sid, a = _secure("spc_home")
-        if not a:
-            return {"zones": zones, "areas": []}
-        areas = self.parse_areas(a.text)
+        # AREAS
+        sid, r_a = _fetch("spc_home")
+        areas = self.parse_areas(r_a.text)
         if self.debug:
             print(f"[DEBUG] Parsed areas count: {len(areas)}")
-            if areas:
-                print(f"[DEBUG] First area: {areas[0]}")
+            if areas: print(f"[DEBUG] First area: {areas[0]}")
+        if len(areas) == 0 and self._is_login_response(r_a.text, getattr(r_a, "url", ""), True):
+            if self.debug:
+                print("[DEBUG] Areas parse empty + looks like login — re-login once")
+            new_sid = self._do_login()
+            if new_sid:
+                sid = new_sid
+                url = f"{self.host}/secure.htm?session={sid}&page=spc_home"
+                r_a = self._get(url, referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
+                areas = self.parse_areas(r_a.text)
+                if self.debug:
+                    print(f"[DEBUG] spc_home retry length: {len(r_a.text)} bytes")
+                    print(f"[DEBUG] Parsed areas after relogin: {len(areas)}")
 
         self._save_cookies()
+        self._save_session_cache(sid)
         return {"zones": zones, "areas": areas}
 
 
@@ -273,22 +290,39 @@ class MQ:
         self.retain = bool(m.get("retain", True))
         self.client_id = m.get("client_id", "spc42-watchdog")
 
-        # signature compatible v1/v2
-        self.client = mqtt.Client(client_id=self.client_id, protocol=mqtt.MQTTv311)
+        if HAVE_V5:
+            self.client = mqtt.Client(
+                client_id=self.client_id,
+                protocol=mqtt.MQTTv311,
+                callback_api_version=CallbackAPIVersion.V5,
+            )
+            def _on_connect(client, userdata, flags, reason_code, properties):
+                ok = (reason_code == 0)
+                self._set_conn(ok, reason_code)
+            def _on_disconnect(client, userdata, reason_code, properties):
+                self._unset_conn(reason_code)
+        else:
+            # fallback v1 (peut afficher un DeprecationWarning selon la version)
+            self.client = mqtt.Client(client_id=self.client_id, protocol=mqtt.MQTTv311)
+            def _on_connect(client, userdata, flags, rc):
+                self._set_conn(rc == 0, rc)
+            def _on_disconnect(client, userdata, rc):
+                self._unset_conn(rc)
+
         if self.user:
             self.client.username_pw_set(self.user, self.pwd)
+
         self.connected = False
-
-        def _on_connect(client, userdata, flags, rc, *args, **kwargs):
-            self.connected = (rc == 0)
-            print("[MQTT] Connecté" if self.connected else f"[MQTT] Connexion échouée rc={rc}")
-
-        def _on_disconnect(client, userdata, rc, *args, **kwargs):
-            self.connected = False
-            print("[MQTT] Déconnecté")
-
         self.client.on_connect = _on_connect
         self.client.on_disconnect = _on_disconnect
+
+    def _set_conn(self, ok: bool, rc: int):
+        self.connected = ok
+        print("[MQTT] Connecté" if ok else f"[MQTT] Connexion échouée rc={rc}")
+
+    def _unset_conn(self, rc: int):
+        self.connected = False
+        print("[MQTT] Déconnecté")
 
     def connect(self):
         while True:
