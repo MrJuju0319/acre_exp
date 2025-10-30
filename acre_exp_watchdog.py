@@ -151,17 +151,32 @@ class SPCClient:
         return m.group(1) if m else ""
 
     def _session_valid(self, sid):
-        try:
-            url = f"{self.host}/secure.htm?session={sid}&page=spc_home"
-            r = self._get(url)
-            low = r.text.lower()
-            if "login.htm" in low or "mot de passe" in low or "identifiant" in low:
-                return False
-            if "spc42" not in r.text:
-                return False
-            return True
-        except Exception:
+    """Validation robuste: pas de redirection login + présence de contenu 'zones'."""
+    try:
+        # 1) Appel d'une page protégée (status_zones) avec le sid
+        url = f"{self.host}/secure.htm?session={sid}&page=status_zones"
+        r = self._get(url)
+
+        # 2) Si on a été redirigé vers login, la session est invalide
+        low = r.text.lower()
+        if "login.htm" in low or "mot de passe" in low or "identifiant" in low:
             return False
+
+        # 3) Chercher un indice HTML réel de la page "zones"
+        #    -> présence d'un tableau "gridtable" ou de l'URL 'page=status_zones' dans le HTML
+        if ("gridtable" in low) or ("page=status_zones" in low):
+            return True
+
+        # 4) Dernière chance : la home protégée sans redirection
+        url2 = f"{self.host}/secure.htm?session={sid}&page=spc_home"
+        r2 = self._get(url2)
+        low2 = r2.text.lower()
+        if "login.htm" in low2 or "mot de passe" in low2 or "identifiant" in low2:
+            return False
+        # On tolère tant que ce n'est PAS une page de login
+        return True
+    except Exception:
+        return False
 
     def _do_login(self):
         try:
@@ -416,3 +431,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
