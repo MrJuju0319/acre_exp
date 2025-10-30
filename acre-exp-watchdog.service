@@ -9,11 +9,12 @@ ExecStart=/usr/local/bin/acre_exp_watchdog.py -c /etc/acre_exp/config.yml
 Restart=always
 RestartSec=3
 
-# Sécurité (assouplis si nécessaire)
-NoNewPrivileges=true
-PrivateTmp=true
+# Sandbox + chemins écriture explicités
 ProtectSystem=full
 ProtectHome=true
+ReadWritePaths=/var/lib/acre_exp /etc/acre_exp
+PrivateTmp=true
+NoNewPrivileges=true
 ProtectKernelModules=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
@@ -28,3 +29,4 @@ Group=root
 
 [Install]
 WantedBy=multi-user.target
+
