@@ -1,7 +1,16 @@
 #!/opt/spc-venv/bin/python3
 # -*- coding: utf-8 -*-
 
-import os, re, sys, time, json, argparse, signal, tempfile, fcntl, contextlib, random
+"""
+ACRE SPC42 → MQTT watchdog
+- Cookies/SID persistants (lock + écriture atomique)
+- Retries HTTP + keep-alive
+- Validation de session robuste + backoff anti-tempête
+- Verrou single-instance (/var/run/acre_exp.lock)
+- MQTT LWT online/offline (compat paho v1/v2)
+"""
+
+import os, re, sys, time, json, argparse, signal, tempfile, fcntl, contextlib, random, pathlib
 import yaml
 import requests
 from requests.adapters import HTTPAdapter
@@ -46,25 +55,25 @@ def atomic_write(path, data_bytes: bytes, mode=0o600):
     os.replace(tmp, path)
     os.chmod(path, mode)
 
-# ---------- Chargement YAML ----------
+def ensure_dir(p):
+    pathlib.Path(p).mkdir(parents=True, exist_ok=True)
+
 def load_cfg(path: str):
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
-def ensure_dir(p):
-    import pathlib
-    pathlib.Path(p).mkdir(parents=True, exist_ok=True)
-
-# ---------- Client SPC (tokens robustes) ----------
+# ---------- Client SPC ----------
 class SPCClient:
     def __init__(self, cfg: dict):
         spc = cfg.get("spc", {})
-        self.host   = spc.get("host", "").rstrip("/")
+        self.host   = (spc.get("host") or "").rstrip("/")
         self.user   = spc.get("user", "")
         self.pin    = spc.get("pin", "")
         self.lang   = str(spc.get("language", 253))
         self.cache  = spc.get("session_cache_dir", "/var/lib/acre_exp")
         self.min_login_interval = int(spc.get("min_login_interval_sec", 60))
+        self._last_login_fail = 0.0
+        self._backoff = 0.0
 
         ensure_dir(self.cache)
         self.session_file = os.path.join(self.cache, "spc_session.json")
@@ -85,6 +94,7 @@ class SPCClient:
         self._load_cookies()
         atexit.register(self._save_cookies)
 
+    # --- Cookies
     def _load_cookies(self):
         try:
             if os.path.exists(self.cookie_file):
@@ -105,6 +115,7 @@ class SPCClient:
         except Exception:
             pass
 
+    # --- HTTP
     def _get(self, url):
         r = self.session.get(url, timeout=8)
         r.raise_for_status()
@@ -119,6 +130,7 @@ class SPCClient:
         r.encoding = "utf-8"
         return r
 
+    # --- Session cache
     def _load_session_cache(self):
         if not os.path.exists(self.session_file):
             return {}
@@ -151,32 +163,23 @@ class SPCClient:
         return m.group(1) if m else ""
 
     def _session_valid(self, sid):
-    """Validation robuste: pas de redirection login + présence de contenu 'zones'."""
-    try:
-        # 1) Appel d'une page protégée (status_zones) avec le sid
-        url = f"{self.host}/secure.htm?session={sid}&page=status_zones"
-        r = self._get(url)
-
-        # 2) Si on a été redirigé vers login, la session est invalide
-        low = r.text.lower()
-        if "login.htm" in low or "mot de passe" in low or "identifiant" in low:
-            return False
-
-        # 3) Chercher un indice HTML réel de la page "zones"
-        #    -> présence d'un tableau "gridtable" ou de l'URL 'page=status_zones' dans le HTML
-        if ("gridtable" in low) or ("page=status_zones" in low):
+        """Validation robuste: pas de redirection login + indices de contenu protégé."""
+        try:
+            url = f"{self.host}/secure.htm?session={sid}&page=status_zones"
+            r = self._get(url)
+            low = r.text.lower()
+            if "login.htm" in low or "mot de passe" in low or "identifiant" in low:
+                return False
+            if ("gridtable" in low) or ("page=status_zones" in low):
+                return True
+            url2 = f"{self.host}/secure.htm?session={sid}&page=spc_home"
+            r2 = self._get(url2)
+            low2 = r2.text.lower()
+            if "login.htm" in low2 or "mot de passe" in low2 or "identifiant" in low2:
+                return False
             return True
-
-        # 4) Dernière chance : la home protégée sans redirection
-        url2 = f"{self.host}/secure.htm?session={sid}&page=spc_home"
-        r2 = self._get(url2)
-        low2 = r2.text.lower()
-        if "login.htm" in low2 or "mot de passe" in low2 or "identifiant" in low2:
+        except Exception:
             return False
-        # On tolère tant que ce n'est PAS une page de login
-        return True
-    except Exception:
-        return False
 
     def _do_login(self):
         try:
@@ -195,22 +198,32 @@ class SPCClient:
     def get_or_login(self):
         d = self._load_session_cache()
         sid = d.get("session", "")
+
         if sid and self._session_valid(sid):
             return sid
 
-        # double-check avant relogin (évite faux négatifs)
-        if sid and not self._last_login_too_recent():
-            time.sleep(1.0)
-            if self._session_valid(sid):
+        now = time.time()
+        if now - self._last_login_fail < (self._backoff or 0):
+            time.sleep(min(self._backoff, 60))
+            if sid and self._session_valid(sid):
                 return sid
 
         if self._last_login_too_recent():
             time.sleep(2)
             if sid and self._session_valid(sid):
                 return sid
-        return self._do_login()
 
-    # mapping
+        new_sid = self._do_login()
+        if new_sid:
+            self._last_login_fail = 0.0
+            self._backoff = 0.0
+            return new_sid
+
+        self._last_login_fail = now
+        self._backoff = min((self._backoff or 2) * 2, 60)
+        return sid or ""
+
+    # --- Mapping + parsing
     @staticmethod
     def zone_bin(etat_txt: str) -> int:
         s = (etat_txt or "").lower()
@@ -342,11 +355,21 @@ class MQ:
         except Exception as e:
             print(f"[MQTT] publish ERR {full}: {e}")
 
-# ---------- Main loop ----------
+# ---------- Main ----------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-c", "--config", default="/etc/acre_exp/config.yml")
     args = ap.parse_args()
+
+    # Lock single instance
+    lock_path = "/var/run/acre_exp.lock"
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("[LOCK] Une autre instance est déjà en cours. Abandon.")
+        sys.exit(0)
 
     cfg = load_cfg(args.config)
     wd  = cfg.get("watchdog", {})
@@ -390,6 +413,7 @@ def main():
 
     print("[SPC→MQTT] État initial publié.")
 
+    # Loop
     while running:
         tick = time.strftime("%H:%M:%S")
         try:
@@ -431,4 +455,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
