@@ -214,10 +214,24 @@ class SPCClient:
             return False
 
     def _do_login(self) -> str:
+        """
+        Perform a login to the SPC controller and return a new session ID.
+
+        This method initiates the login sequence by requesting the login page
+        then posts the user credentials.  On success, the new session ID is
+        cached and cookies are saved.  Note that we avoid using ``urljoin``
+        here because ``urljoin`` is not imported in this module; instead we
+        construct the URL manually.
+        """
         try:
-            self._get(urljoin(self.host, "/login.htm"))
+            # Initiate the login sequence by fetching the login page.  The
+            # controller may set an initial cookie here.
+            self._get(f"{self.host}/login.htm")
         except Exception:
+            # Ignore errors fetching the login page; we'll attempt to login anyway.
             pass
+        # Submit the user credentials.  The SPC controller returns a redirect
+        # URL containing the new session ID.
         url = f"{self.host}/login.htm?action=login&language={self.lang}"
         r = self._post(url, {"userid": self.user, "password": self.pin}, allow_redirects=True)
         sid = self._extract_session(r.url) or self._extract_session(r.text)
