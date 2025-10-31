@@ -102,6 +102,81 @@ class SPCClient:
         except Exception:
             pass
 
+    def _last_login_too_recent(self) -> bool:
+        try:
+            data = self._load_session_cache()
+            last = float(data.get("time", 0) or 0)
+        except Exception:
+            last = 0.0
+        delta = time.time() - last
+        too_recent = delta < self.min_login_interval
+        if too_recent and self.debug:
+            logging.debug("Dernière tentative de login il y a %.1fs — attente min %ss", delta, self.min_login_interval)
+        return too_recent
+
+    def _session_valid(self, sid: str) -> bool:
+        if not sid:
+            return False
+        try:
+            url = f"{self.host}/secure.htm?session={sid}&page=spc_home"
+            r = self._get(url, referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
+        except Exception:
+            if self.debug:
+                logging.debug("Validation session %s impossible (erreur requête)", sid, exc_info=True)
+            return False
+
+        if self._is_login_response(r.text, getattr(r, "url", ""), True):
+            if self.debug:
+                logging.debug("Session %s invalide : page de login renvoyée", sid)
+            return False
+
+        if self.debug:
+            logging.debug("Session %s toujours valide", sid)
+        return True
+
+    def _do_login(self) -> str:
+        if self.debug:
+            logging.debug("Connexion SPC…")
+        try:
+            self._get(f"{self.host}/login.htm")
+        except Exception:
+            if self.debug:
+                logging.debug("Pré-chargement login.htm échoué", exc_info=True)
+        url = f"{self.host}/login.htm?action=login&language={self.lang}"
+        try:
+            r = self._post(
+                url,
+                {"userid": self.user, "password": self.pin},
+                allow_redirects=True,
+                referer=f"{self.host}/login.htm",
+            )
+        except Exception:
+            if self.debug:
+                logging.debug("POST login échoué", exc_info=True)
+            return ""
+
+        sid = self._extract_session(getattr(r, "url", "")) or self._extract_session(r.text)
+        if self.debug:
+            logging.debug("Login SID=%s", sid or "(aucun)")
+        if sid:
+            self._save_session_cache(sid)
+            self._save_cookies()
+            return sid
+        return ""
+
+    def get_or_login(self) -> str:
+        data = self._load_session_cache()
+        sid = data.get("session", "")
+        if sid and self._session_valid(sid):
+            return sid
+
+        if self._last_login_too_recent():
+            time.sleep(2)
+            if sid and self._session_valid(sid):
+                return sid
+
+        return self._do_login()
+
     @staticmethod
     def _extract_session(text_or_url):
         if not text_or_url:
