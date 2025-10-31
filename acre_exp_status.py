@@ -278,9 +278,20 @@ class SPCClient:
                 sect  = tds[1].get_text(strip=True)
                 entree_txt = self._extract_state_text(tds[4])
                 etat_txt   = self._extract_state_text(tds[5])
+                raw_entree, raw_etat = "", ""
+                if self.debug:
+                    try:
+                        raw_entree = tds[4].decode_contents().strip()
+                    except Exception:
+                        raw_entree = str(tds[4])
+                    try:
+                        raw_etat = tds[5].decode_contents().strip()
+                    except Exception:
+                        raw_etat = str(tds[5])
+
                 entree_code, entree_txt = self._infer_entree(tds[4], entree_txt, etat_txt)
                 if zname:
-                    zones.append({
+                    zone_data = {
                         "zone": zname,
                         "secteur": sect,
                         "entree_txt": entree_txt,
@@ -288,7 +299,19 @@ class SPCClient:
                         "entree": entree_code,
                         "etat":   self._map_zone_state(etat_txt),
                         "id":     self.zone_id_from_name(zname),
-                    })
+                    }
+                    if self.debug and (entree_code == -1 or zone_data["etat"] == -1):
+                        logging.debug(
+                            "Zone '%s' parsed with raw_entree=%r raw_etat=%r -> entree_txt=%r etat_txt=%r code=%s etat=%s",
+                            zname,
+                            raw_entree,
+                            raw_etat,
+                            entree_txt,
+                            etat_txt,
+                            entree_code,
+                            zone_data["etat"],
+                        )
+                    zones.append(zone_data)
         return zones
 
     def parse_areas(self, html):
@@ -303,11 +326,24 @@ class SPCClient:
                 m = re.match(r"^Secteur\s+(\d+)\s*:\s*(.+)$", label, re.I)
                 if m:
                     num, nom = m.groups()
+                    area_state = self._map_area_state(state)
+                    if self.debug and (not state or (area_state == 0 and state.strip() == "")):
+                        try:
+                            raw_state = tds[2].decode_contents().strip()
+                        except Exception:
+                            raw_state = str(tds[2])
+                        logging.debug(
+                            "Area '%s' parsed with raw_state=%r -> etat_txt=%r etat=%s",
+                            nom,
+                            raw_state,
+                            state,
+                            area_state,
+                        )
                     areas.append({
                         "secteur": f"{num} {nom}",
                         "nom": nom,
                         "etat_txt": state,
-                        "etat": self._map_area_state(state),
+                        "etat": area_state,
                         "sid": num,
                     })
         return areas
