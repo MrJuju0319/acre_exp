@@ -88,10 +88,12 @@ echo -e "${C_GREEN}>>> Installation deps Python (requests, bs4, pyyaml, paho-mqt
 
 # --- Sanity check paho v2 + API V5 ---
 "${VENV_DIR}/bin/python" - <<'PY'
-import paho.mqtt.client as m
-from paho.mqtt.client import CallbackAPIVersion as C
-assert hasattr(C, "V5"), "CallbackAPIVersion.V5 indisponible (paho-mqtt v2 attendu)"
-print("paho-mqtt OK:", m.__version__)
+from importlib import metadata
+
+version = metadata.version("paho-mqtt")
+major = int(version.split(".")[0])
+assert major >= 2, f"paho-mqtt v2 requis, version détectée: {version}"
+print("paho-mqtt OK:", version)
 PY
 
 # --- Config (uniquement en --install) ---
