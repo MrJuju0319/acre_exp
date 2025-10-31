@@ -8,13 +8,17 @@ from bs4 import BeautifulSoup
 from http.cookiejar import MozillaCookieJar
 from typing import Dict
 
-# paho-mqtt v2.x, API V5 requise
+# paho-mqtt v2.x (API V5) recommandé — compatibilité assurée avec v1.x
 try:
     from paho.mqtt import client as mqtt
+except Exception:
+    print("[ERREUR] paho-mqtt non disponible : /opt/spc-venv/bin/pip install 'paho-mqtt>=2,<3'")
+    sys.exit(1)
+
+try:
     from paho.mqtt.client import CallbackAPIVersion
 except Exception:
-    print("[ERREUR] paho-mqtt v2.x requis : /opt/spc-venv/bin/pip install 'paho-mqtt>=2,<3'")
-    sys.exit(1)
+    CallbackAPIVersion = None  # paho-mqtt < 1.6
 
 def load_cfg(path: str):
     with open(path, "r", encoding="utf-8") as f:
@@ -240,18 +244,40 @@ class MQ:
         proto = str(m.get("protocol", "v311")).lower()
         self.protocol = mqtt.MQTTv5 if proto in ("v5", "mqttv5", "5") else mqtt.MQTTv311
 
-        self.client = mqtt.Client(
-            client_id=self.client_id,
-            protocol=self.protocol,
-            callback_api_version=CallbackAPIVersion.V5,
-        )
+        client_kwargs = {
+            "client_id": self.client_id,
+            "protocol": self.protocol,
+        }
 
-        def _on_connect(client, userdata, flags, reason_code, properties):
-            ok = (reason_code == 0)
-            self._set_conn(ok, reason_code)
+        callback_version = None
+        if CallbackAPIVersion is not None:
+            for attr in ("V5", "V311", "V3"):
+                ver = getattr(CallbackAPIVersion, attr, None)
+                if ver is not None:
+                    callback_version = ver
+                    client_kwargs["callback_api_version"] = ver
+                    break
+        if callback_version is None:
+            print("[MQTT] Attention : API callbacks V3 utilisée (paho-mqtt ancien)")
 
-        def _on_disconnect(client, userdata, reason_code, properties):
-            self._unset_conn(reason_code)
+        self.client = mqtt.Client(**client_kwargs)
+
+        def _normalize_reason_code(code):
+            if code is None:
+                return 0
+            value = getattr(code, "value", code)
+            try:
+                return int(value)
+            except Exception:
+                return 0
+
+        def _on_connect(client, userdata, flags, reason_code=0, *rest):
+            rc = _normalize_reason_code(reason_code)
+            self._set_conn(rc == 0, rc)
+
+        def _on_disconnect(client, userdata, reason_code=0, *rest):
+            rc = _normalize_reason_code(reason_code)
+            self._unset_conn(rc)
 
         if self.user:
             self.client.username_pw_set(self.user, self.pwd)

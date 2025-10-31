@@ -83,8 +83,8 @@ echo -e "${C_GREEN}>>> Préparation du venv Python:${C_RESET} ${VENV_DIR}"
 if [[ ! -d "$VENV_DIR" ]]; then python3 -m venv "$VENV_DIR"; fi
 "${VENV_DIR}/bin/python" -m pip install --upgrade pip >/dev/null
 
-echo -e "${C_GREEN}>>> Installation deps Python (requests, bs4, pyyaml, paho-mqtt v2.x)${C_RESET}"
-"${VENV_DIR}/bin/pip" install --quiet requests beautifulsoup4 pyyaml "paho-mqtt>=2,<3"
+echo -e "${C_GREEN}>>> Installation deps Python (requests, bs4, pyyaml, paho-mqtt >=2,<3)${C_RESET}"
+"${VENV_DIR}/bin/pip" install --quiet --upgrade requests beautifulsoup4 pyyaml "paho-mqtt>=2,<3"
 
 # --- Sanity check paho v2 + API V5 ---
 "${VENV_DIR}/bin/python" - <<'PY'
