@@ -162,6 +162,14 @@ class SPCClient:
         return -1
 
     @staticmethod
+    def zone_id_from_name(name: str) -> str:
+        m = re.match(r"^\s*(\d+)\b", name or "")
+        if m:
+            return m.group(1)
+        slug = re.sub(r"[^a-zA-Z0-9]+", "_", name or "").strip("_").lower()
+        return slug or "unknown"
+
+    @staticmethod
     def _map_area_state(txt):
         s = (txt or "").lower()
         if "mes totale" in s: return 2
@@ -191,6 +199,7 @@ class SPCClient:
                         "etat_txt": etat_txt,
                         "entree": self._map_entree(entree_txt),
                         "etat":   self._map_zone_state(etat_txt),
+                        "id":     self.zone_id_from_name(zname),
                     })
         return zones
 
@@ -210,7 +219,8 @@ class SPCClient:
                         "secteur": f"{num} {nom}",
                         "nom": nom,
                         "etat_txt": state,
-                        "etat": self._map_area_state(state)
+                        "etat": self._map_area_state(state),
+                        "sid": num,
                     })
         return areas
 
