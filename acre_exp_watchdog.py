@@ -8,7 +8,7 @@ from bs4 import BeautifulSoup
 from http.cookiejar import MozillaCookieJar
 from typing import Dict
 
-# === paho-mqtt v2.x, API V5 ===
+# paho-mqtt v2.x, API V5 requise
 try:
     from paho.mqtt import client as mqtt
     from paho.mqtt.client import CallbackAPIVersion
@@ -116,14 +116,14 @@ class SPCClient:
             return False
         low = resp_text.lower()
         has_user = ('name="userid"' in low) or ('id="userid"' in low) or ("id='userid'" in low)
-        has_pass = ('name="password"' in low) or ('id="password'" in low) or ("id='password'" in low)
+        # >>> BUG FIX: quotes corrigés (pas de " au milieu) <<<
+        has_pass = ('name="password"' in low) or ('id="password"' in low) or ("id='password'" in low)
         return has_user and has_pass
 
     @staticmethod
     def _extract_state_text(td):
         txt = td.get_text(strip=True)
-        if txt:
-            return txt
+        if txt: return txt
         img = td.find("img")
         if img:
             alt = (img.get("alt") or "").strip()
@@ -185,15 +185,6 @@ class SPCClient:
                     areas.append({"sid": num, "nom": nom, "etat_txt": state})
         return areas
 
-    def __init_logging(self, debug: bool):
-        logging.basicConfig(stream=sys.stderr, level=(logging.DEBUG if debug else logging.INFO),
-                            format="%(levelname)s:%(message)s")
-
-    def fetch(self):
-        # placeholder; logging configuration is done in main()
-        pass
-
-    # Split fetch out of __init__ to keep code above tidy
     def fetch(self):
         sid = self.get_or_login()
         if not sid: return {"zones": [], "areas": []}
@@ -234,7 +225,6 @@ class SPCClient:
         self._save_cookies()
         self._save_session_cache(sid)
         return {"zones": zones, "areas": areas}
-
 
 class MQ:
     def __init__(self, cfg: dict):
@@ -296,7 +286,6 @@ class MQ:
             self.client.publish(full, payload=str(payload), qos=self.qos, retain=self.retain)
         except Exception as e:
             print(f"[MQTT] publish ERR {full}: {e}")
-
 
 def main() -> None:
     ap = argparse.ArgumentParser()
