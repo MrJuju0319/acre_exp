@@ -202,13 +202,28 @@ class SPCClient:
     @staticmethod
     def _extract_state_text(td):
         txt = td.get_text(strip=True)
-        if txt: return txt
+        if txt:
+            return txt
+
+        for attr in ("data-original-title", "data-bs-original-title", "title", "aria-label"):
+            val = (td.get(attr) or "").strip()
+            if val:
+                return val
+
         img = td.find("img")
         if img:
-            alt = (img.get("alt") or "").strip()
-            if alt: return alt
-            title = (img.get("title") or "").strip()
-            if title: return title
+            for attr in ("alt", "title", "data-original-title", "data-bs-original-title", "aria-label"):
+                val = (img.get(attr) or "").strip()
+                if val:
+                    return val
+
+            src = (img.get("src") or "").lower()
+            if src:
+                if "open" in src or "alarm" in src or "trouble" in src:
+                    return "ouverte"
+                if "closed" in src or "secure" in src or "normal" in src:
+                    return "fermée"
+
         return ""
 
     @staticmethod
