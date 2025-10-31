@@ -244,10 +244,24 @@ class SPCClient:
             if len(tds) >= 6:
                 zname = tds[0].get_text(strip=True)
                 sect  = tds[1].get_text(strip=True)
+                entree_txt = self._extract_state_text(tds[4])
                 etat_txt = self._extract_state_text(tds[5])
                 if zname:
-                    zones.append({"zname": zname, "sect": sect, "etat_txt": etat_txt})
+                    zones.append({
+                        "zname": zname,
+                        "sect": sect,
+                        "entree_txt": entree_txt,
+                        "etat_txt": etat_txt,
+                    })
         return zones
+
+    @staticmethod
+    def zone_input(entree_txt: str) -> int:
+        s = (entree_txt or "").lower()
+        if "ferm" in s: return 1
+        if "ouvert" in s: return 0
+        if "alarm" in s: return 0
+        return -1
 
     def parse_areas(self, html):
         soup = BeautifulSoup(html, "html.parser")
@@ -419,6 +433,7 @@ def main() -> None:
     mq.connect()
 
     last_z: Dict[str, int] = {}
+    last_z_in: Dict[str, int] = {}
     last_a: Dict[str, int] = {}
 
     running = True
@@ -438,6 +453,10 @@ def main() -> None:
         if b in (0,1):
             last_z[zid] = b
             mq.pub(f"zones/{zid}/state", b)
+        entree = SPCClient.zone_input(z.get("entree_txt"))
+        if entree in (0,1):
+            last_z_in[zid] = entree
+            mq.pub(f"zones/{zid}/entree", entree)
 
     for a in snap["areas"]:
         sid = a["sid"]
@@ -468,6 +487,16 @@ def main() -> None:
                 last_z[zid] = b
                 if log_changes:
                     print(f"[{tick}] 🟡 Zone '{z['zname']}' → {b}")
+
+            entree = SPCClient.zone_input(z.get("entree_txt"))
+            if entree in (0,1):
+                old_in = last_z_in.get(zid)
+                if old_in is None or entree != old_in:
+                    mq.pub(f"zones/{zid}/entree", entree)
+                    last_z_in[zid] = entree
+                    if log_changes:
+                        state_txt = "fermée" if entree == 1 else "ouverte"
+                        print(f"[{tick}] 🟢 Entrée zone '{z['zname']}' → {state_txt}")
 
         for a in data["areas"]:
             sid = a["sid"]
