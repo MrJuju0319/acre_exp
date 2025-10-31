@@ -8,6 +8,8 @@ from bs4 import BeautifulSoup
 from http.cookiejar import MozillaCookieJar
 from typing import Dict
 
+from acre_exp_status import SPCClient as StatusSPCClient
+
 # paho-mqtt v2.x (API V5) recommandé — compatibilité assurée avec v1.x
 try:
     from paho.mqtt import client as mqtt
@@ -28,79 +30,9 @@ def ensure_dir(p):
     import pathlib
     pathlib.Path(p).mkdir(parents=True, exist_ok=True)
 
-class SPCClient:
+class SPCClient(StatusSPCClient):
     def __init__(self, cfg: dict, debug: bool = False):
-        spc = cfg.get("spc", {})
-        self.host   = spc.get("host", "").rstrip("/")
-        self.user   = spc.get("user", "")
-        self.pin    = spc.get("pin", "")
-        self.lang   = str(spc.get("language", 253))
-        self.cache  = spc.get("session_cache_dir", "/var/lib/acre_exp")
-        self.min_login_interval = int(spc.get("min_login_interval_sec", 60))
-        self.debug = bool(spc.get("_debug", False)) or debug
-
-        ensure_dir(self.cache)
-        self.session_file = os.path.join(self.cache, "spc_session.json")
-        self.cookie_file  = os.path.join(self.cache, "spc_cookies.jar")
-
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0 Safari/537.36",
-            "Connection": "keep-alive",
-        })
-        self.cookiejar = MozillaCookieJar(self.cookie_file)
-        self._load_cookies()
-
-    def _load_cookies(self):
-        try:
-            if os.path.exists(self.cookie_file):
-                self.cookiejar.load(ignore_discard=True, ignore_expires=True)
-            self.session.cookies = self.cookiejar
-        except Exception:
-            try: os.remove(self.cookie_file)
-            except Exception: pass
-            from http.cookiejar import MozillaCookieJar as MCJ
-            self.session.cookies = MCJ()
-
-    def _save_cookies(self):
-        try:
-            self.cookiejar.save(ignore_discard=True, ignore_expires=True)
-        except Exception:
-            pass
-
-    def _get(self, url, referer=None):
-        headers = {}
-        if referer:
-            headers["Referer"] = referer
-        r = self.session.get(url, timeout=8, headers=headers, allow_redirects=True)
-        r.raise_for_status()
-        r.encoding = "utf-8"
-        return r
-
-    def _post(self, url, data, referer=None, allow_redirects=True):
-        headers = {}
-        if referer:
-            headers["Referer"] = referer
-        r = self.session.post(url, data=data, allow_redirects=allow_redirects, timeout=8, headers=headers)
-        r.raise_for_status()
-        r.encoding = "utf-8"
-        return r
-
-    def _load_session_cache(self):
-        if not os.path.exists(self.session_file):
-            return {}
-        try:
-            with open(self.session_file, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-
-    def _save_session_cache(self, sid):
-        try:
-            with open(self.session_file, "w", encoding="utf-8") as f:
-                json.dump({"session": sid, "time": time.time()}, f)
-        except Exception:
-            pass
+        super().__init__(cfg, debug)
 
     def _last_login_too_recent(self) -> bool:
         try:
@@ -195,143 +127,151 @@ class SPCClient:
             return False
         low = resp_text.lower()
         has_user = ('name="userid"' in low) or ('id="userid"' in low) or ("id='userid'" in low)
-        # >>> BUG FIX: quotes corrigés (pas de " au milieu) <<<
         has_pass = ('name="password"' in low) or ('id="password"' in low) or ("id='password'" in low)
-        return has_user and has_pass
+        if has_user and has_pass:
+            return True
+        return "utilisateur déconnecté" in low
 
     @staticmethod
-    def _extract_state_text(td):
-        txt = td.get_text(strip=True)
-        if txt:
-            return txt
+    def _normalize_state_text(txt: str) -> str:
+        return (txt or "").strip().lower()
 
-        for attr in ("data-original-title", "data-bs-original-title", "title", "aria-label"):
-            val = (td.get(attr) or "").strip()
-            if val:
-                return val
+    @classmethod
+    def zone_bin(cls, zone) -> int:
+        if isinstance(zone, dict):
+            etat = zone.get("etat")
+            if isinstance(etat, int):
+                if etat == 1:
+                    return 1
+                if etat in (0, 2, 3):
+                    return 0
+                if etat >= 4:
+                    return 1
+            etat_txt = zone.get("etat_txt")
+        else:
+            etat_txt = zone
 
-        img = td.find("img")
-        if img:
-            for attr in ("alt", "title", "data-original-title", "data-bs-original-title", "aria-label"):
-                val = (img.get(attr) or "").strip()
-                if val:
-                    return val
+        s = cls._normalize_state_text(etat_txt)
+        if any(x in s for x in ("activ", "alarm", "alarme", "trouble", "défaut", "defaut")):
+            return 1
+        if any(x in s for x in ("normal", "repos", "isol", "inhib")):
+            return 0
+        return -1
 
-            src = (img.get("src") or "").lower()
-            if src:
-                if "open" in src or "alarm" in src or "trouble" in src:
-                    return "ouverte"
-                if "closed" in src or "secure" in src or "normal" in src:
-                    return "fermée"
+    @classmethod
+    def area_num(cls, area) -> int:
+        if isinstance(area, dict):
+            etat = area.get("etat")
+            if isinstance(etat, int) and etat >= 0:
+                return etat
+            etat_txt = area.get("etat_txt")
+        else:
+            etat_txt = area
 
+        s = cls._normalize_state_text(etat_txt)
+        if "mes totale" in s:
+            return 2
+        if "mes partiel" in s:
+            return 3
+        if "alarme" in s:
+            return 4
+        if "mhs" in s or "désarm" in s:
+            return 1
+        return 0
+
+    @staticmethod
+    def zone_id_from_name(zone) -> str:
+        if isinstance(zone, dict):
+            name = zone.get("zone") or zone.get("zname") or zone.get("name") or ""
+        else:
+            name = zone or ""
+        m = re.match(r"^\s*(\d+)\b", name)
+        if m:
+            return m.group(1)
+        slug = re.sub(r"[^a-zA-Z0-9]+", "_", name).strip("_").lower()
+        return slug or "unknown"
+
+    @staticmethod
+    def zone_name(zone) -> str:
+        if isinstance(zone, dict):
+            return zone.get("zone") or zone.get("zname") or ""
+        return str(zone or "")
+
+    @staticmethod
+    def zone_sector(zone) -> str:
+        if isinstance(zone, dict):
+            return zone.get("secteur") or zone.get("sect") or ""
         return ""
 
     @staticmethod
-    def zone_bin(etat_txt: str) -> int:
-        s = (etat_txt or "").lower()
-        if "normal" in s: return 0
-        if "activ"  in s: return 1
+    def zone_input(zone) -> int:
+        if isinstance(zone, dict):
+            entree = zone.get("entree")
+            if isinstance(entree, int) and entree in (0, 1, 2, 3):
+                return entree
+            entree_txt = zone.get("entree_txt")
+            etat_val = zone.get("etat") if isinstance(zone.get("etat"), int) else None
+        else:
+            entree_txt = zone
+            etat_val = None
+
+        s = SPCClient._normalize_state_text(entree_txt)
+        if "isol" in s:
+            return 2
+        if "inhib" in s:
+            return 3
+        if "ferm" in s:
+            return 0
+        if "ouvr" in s or "alarm" in s:
+            return 1
+        if etat_val is not None:
+            if etat_val == 2:
+                return 2
+            if etat_val == 3:
+                return 3
+            if etat_val == 1:
+                return 1
+            if etat_val == 0:
+                return 0
+            if etat_val >= 4:
+                return 1
         return -1
 
     @staticmethod
-    def area_num(etat_txt: str) -> int:
-        s = (etat_txt or "").lower()
-        if "mhs" in s or "désarm" in s: return 0
-        if "mes totale" in s: return 1
-        if "mes partiel" in s: return 2
-        return -1
-
-    @staticmethod
-    def zone_id_from_name(name: str) -> str:
-        m = re.match(r"^\s*(\d+)\b", name or "")
-        if m: return m.group(1)
-        import re as _re
-        slug = _re.sub(r"[^a-zA-Z0-9]+", "_", name or "").strip("_").lower()
-        return slug or "unknown"
-
-    def parse_zones(self, html):
-        soup = BeautifulSoup(html, "html.parser")
-        grid = soup.find("table", {"class": "gridtable"})
-        zones = []
-        if not grid: return zones
-        for tr in grid.find_all("tr"):
-            tds = tr.find_all("td")
-            if len(tds) >= 6:
-                zname = tds[0].get_text(strip=True)
-                sect  = tds[1].get_text(strip=True)
-                entree_txt = self._extract_state_text(tds[4])
-                etat_txt = self._extract_state_text(tds[5])
-                if zname:
-                    zones.append({
-                        "zname": zname,
-                        "sect": sect,
-                        "entree_txt": entree_txt,
-                        "etat_txt": etat_txt,
-                    })
-        return zones
-
-    @staticmethod
-    def zone_input(entree_txt: str) -> int:
-        s = (entree_txt or "").lower()
-        if "ferm" in s: return 1
-        if "ouvert" in s: return 0
-        if "alarm" in s: return 0
-        return -1
-
-    def parse_areas(self, html):
-        soup = BeautifulSoup(html, "html.parser")
-        areas = []
-        for tr in soup.find_all("tr"):
-            tds = tr.find_all("td")
-            if len(tds) < 3: continue
-            label = tds[1].get_text(strip=True)
-            state = self._extract_state_text(tds[2])
-            if label.lower().startswith("secteur"):
-                m = re.match(r"^Secteur\s+(\d+)\s*:\s*(.+)$", label, re.I)
-                if m:
-                    num, nom = m.groups()
-                    areas.append({"sid": num, "nom": nom, "etat_txt": state})
-        return areas
+    def area_id(area) -> str:
+        if isinstance(area, dict):
+            sid = area.get("sid")
+            if sid:
+                return str(sid).strip()
+            label = area.get("secteur") or ""
+            m = re.match(r"^\s*(\d+)\b", label)
+            if m:
+                return m.group(1)
+            name = area.get("nom")
+            if name:
+                return SPCClient.zone_id_from_name(name)
+        return ""
 
     def fetch(self):
-        sid = self.get_or_login()
-        if not sid: return {"zones": [], "areas": []}
+        data = super().fetch_status()
+        if not isinstance(data, dict):
+            return {"zones": [], "areas": []}
+        if "error" in data:
+            raise RuntimeError(data["error"])
 
-        def _fetch(page: str):
-            url = f"{self.host}/secure.htm?session={sid}&page={page}"
-            logging.debug("Requesting %s from: %s", page, url)
-            r = self._get(url, referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
-            logging.debug("%s page length: %d bytes", page, len(r.text))
-            return sid, r
+        zones = data.get("zones", [])
+        for z in zones:
+            if isinstance(z, dict):
+                if not z.get("id"):
+                    z["id"] = self.zone_id_from_name(z)
 
-        sid, r_z = _fetch("status_zones")
-        zones = self.parse_zones(r_z.text)
-        logging.debug("Parsed zones count: %d", len(zones))
-        if len(zones) == 0 and self._is_login_response(r_z.text, getattr(r_z, "url", ""), True):
-            logging.debug("Zones parse empty + looks like login — re-login once")
-            new_sid = self._do_login()
-            if new_sid:
-                sid = new_sid
-                r_z = self._get(f"{self.host}/secure.htm?session={sid}&page=status_zones",
-                                 referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
-                zones = self.parse_zones(r_z.text)
-                logging.debug("status_zones retry length: %d — parsed: %d", len(r_z.text), len(zones))
+        areas = data.get("areas", [])
+        for a in areas:
+            if isinstance(a, dict):
+                sid = self.area_id(a)
+                if sid:
+                    a.setdefault("sid", sid)
 
-        sid, r_a = _fetch("spc_home")
-        areas = self.parse_areas(r_a.text)
-        logging.debug("Parsed areas count: %d", len(areas))
-        if len(areas) == 0 and self._is_login_response(r_a.text, getattr(r_a, "url", ""), True):
-            logging.debug("Areas parse empty + looks like login — re-login once")
-            new_sid = self._do_login()
-            if new_sid:
-                sid = new_sid
-                r_a = self._get(f"{self.host}/secure.htm?session={sid}&page=spc_home",
-                                 referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
-                areas = self.parse_areas(r_a.text)
-                logging.debug("spc_home retry length: %d — parsed: %d", len(r_a.text), len(areas))
-
-        self._save_cookies()
-        self._save_session_cache(sid)
         return {"zones": zones, "areas": areas}
 
 class MQ:
@@ -461,22 +401,27 @@ def main() -> None:
     # Snapshot initial
     snap = spc.fetch()
     for z in snap["zones"]:
-        zid = SPCClient.zone_id_from_name(z["zname"])
-        b   = SPCClient.zone_bin(z["etat_txt"])
-        mq.pub(f"zones/{zid}/name", z["zname"])
-        mq.pub(f"zones/{zid}/secteur", z["sect"])
-        if b in (0,1):
+        zid = SPCClient.zone_id_from_name(z)
+        zname = SPCClient.zone_name(z)
+        if not zid or not zname:
+            continue
+        mq.pub(f"zones/{zid}/name", zname)
+        mq.pub(f"zones/{zid}/secteur", SPCClient.zone_sector(z))
+        b = SPCClient.zone_bin(z)
+        if b in (0, 1):
             last_z[zid] = b
             mq.pub(f"zones/{zid}/state", b)
-        entree = SPCClient.zone_input(z.get("entree_txt"))
-        if entree in (0,1):
+        entree = SPCClient.zone_input(z)
+        if entree in (0, 1, 2, 3):
             last_z_in[zid] = entree
             mq.pub(f"zones/{zid}/entree", entree)
 
     for a in snap["areas"]:
-        sid = a["sid"]
-        s   = SPCClient.area_num(a["etat_txt"])
-        mq.pub(f"secteurs/{sid}/name", a["nom"])
+        sid = SPCClient.area_id(a)
+        if not sid:
+            continue
+        mq.pub(f"secteurs/{sid}/name", a.get("nom", ""))
+        s = SPCClient.area_num(a)
         if s >= 0:
             last_a[sid] = s
             mq.pub(f"secteurs/{sid}/state", s)
@@ -493,36 +438,46 @@ def main() -> None:
             continue
 
         for z in data["zones"]:
-            zid = SPCClient.zone_id_from_name(z["zname"])
-            b   = SPCClient.zone_bin(z["etat_txt"])
-            if b not in (0,1): continue
+            zid = SPCClient.zone_id_from_name(z)
+            zname = SPCClient.zone_name(z)
+            if not zid or not zname:
+                continue
+            b = SPCClient.zone_bin(z)
+            if b not in (0, 1):
+                continue
             old = last_z.get(zid)
             if old is None or b != old:
                 mq.pub(f"zones/{zid}/state", b)
                 last_z[zid] = b
                 if log_changes:
-                    print(f"[{tick}] 🟡 Zone '{z['zname']}' → {b}")
+                    print(f"[{tick}] 🟡 Zone '{zname}' → {b}")
 
-            entree = SPCClient.zone_input(z.get("entree_txt"))
-            if entree in (0,1):
+            entree = SPCClient.zone_input(z)
+            if entree in (0, 1, 2, 3):
                 old_in = last_z_in.get(zid)
                 if old_in is None or entree != old_in:
                     mq.pub(f"zones/{zid}/entree", entree)
                     last_z_in[zid] = entree
                     if log_changes:
-                        state_txt = "fermée" if entree == 1 else "ouverte"
-                        print(f"[{tick}] 🟢 Entrée zone '{z['zname']}' → {state_txt}")
+                        state_txt = {
+                            0: "fermée",
+                            1: "ouverte",
+                            2: "isolée",
+                            3: "inhibée",
+                        }.get(entree, str(entree))
+                        print(f"[{tick}] 🟢 Entrée zone '{zname}' → {state_txt}")
 
         for a in data["areas"]:
-            sid = a["sid"]
-            s   = SPCClient.area_num(a["etat_txt"])
-            if s < 0: continue
+            sid = SPCClient.area_id(a)
+            if not sid:
+                continue
+            s = SPCClient.area_num(a)
             old = last_a.get(sid)
             if old is None or s != old:
                 mq.pub(f"secteurs/{sid}/state", s)
                 last_a[sid] = s
                 if log_changes:
-                    print(f"[{tick}] 🔵 Secteur '{a['nom']}' → {s}")
+                    print(f"[{tick}] 🔵 Secteur '{a.get('nom', sid)}' → {s}")
 
         time.sleep(interval)
 
