@@ -1,7 +1,7 @@
 #!/opt/spc-venv/bin/python3
 # -*- coding: utf-8 -*-
 
-import os, re, sys, json, time, pathlib, argparse, logging
+import os, re, sys, json, time, pathlib, argparse, logging, unicodedata
 import requests
 from bs4 import BeautifulSoup
 from http.cookiejar import MozillaCookieJar
@@ -135,6 +135,79 @@ class SPCClient:
         return self._do_login()
 
     @staticmethod
+    def _normalize_label(text: str) -> str:
+        if not text:
+            return ""
+        normalized = unicodedata.normalize("NFKD", text)
+        return "".join(ch for ch in normalized if not unicodedata.combining(ch)).lower().strip()
+
+    @staticmethod
+    def _attr_values(node):
+        if not node:
+            return []
+        values = []
+        for _, val in node.attrs.items():
+            if not val:
+                continue
+            if isinstance(val, (list, tuple, set)):
+                values.extend(str(v) for v in val if v)
+            else:
+                values.append(str(val))
+        return values
+
+    @staticmethod
+    def _guess_zone_state_label(token: str) -> str:
+        norm = SPCClient._normalize_label(token)
+        if not norm:
+            return ""
+        if any(k in norm for k in ("ferm", "close", "ferme", "locked", "normal")):
+            return "Fermée"
+        if any(k in norm for k in ("ouvr", "open", "unlock")):
+            return "Ouverte"
+        if any(k in norm for k in ("isol", "isole", "isolee", "isolation", "separe")):
+            return "Isolée"
+        if any(k in norm for k in ("inhib", "bypass", "shunt")):
+            return "Inhibée"
+        if any(k in norm for k in ("trou", "fault", "defaut", "defa", "anomal")):
+            return "Trouble"
+        if any(k in norm for k in ("alarm", "alarme", "alert")):
+            return "Alarme"
+        if any(k in norm for k in ("vert", "green")):
+            return "Fermée"
+        if any(k in norm for k in ("roug", "red")):
+            return "Ouverte"
+        if any(k in norm for k in ("orang", "amber")):
+            return "Isolée"
+        if any(k in norm for k in ("bleu", "blue")):
+            return "Inhibée"
+        return ""
+
+    @staticmethod
+    def _guess_area_state_label(token: str) -> str:
+        norm = SPCClient._normalize_label(token)
+        if not norm:
+            return ""
+        if any(k in norm for k in ("mes totale", "total", "totale", "tot")):
+            return "MES Totale"
+        if any(k in norm for k in ("mes part", "partiel", "partial", "part")):
+            return "MES Partielle"
+        if any(k in norm for k in ("mhs", "desarm", "desactive", "off", "ready")):
+            return "MHS"
+        if any(k in norm for k in ("alarm", "alarme", "alert")):
+            return "Alarme"
+        if any(k in norm for k in ("trou", "fault", "defaut", "defa")):
+            return "Trouble"
+        return ""
+
+    @staticmethod
+    def _find_column(headers, keywords, default=None):
+        for idx, label in enumerate(headers or []):
+            for kw in keywords:
+                if kw in label:
+                    return idx
+        return default
+
+    @staticmethod
     def _extract_state_text(td):
         if td is None:
             return ""
@@ -176,6 +249,23 @@ class SPCClient:
             val = (td.get(attr) or "").strip()
             if val:
                 return val
+
+        for attr_val in SPCClient._attr_values(td):
+            guess = SPCClient._guess_zone_state_label(attr_val)
+            if guess:
+                return guess
+            attr_val = attr_val.strip()
+            if attr_val:
+                return attr_val
+
+        for child in td.find_all(True):
+            for attr_val in SPCClient._attr_values(child):
+                guess = SPCClient._guess_zone_state_label(attr_val)
+                if guess:
+                    return guess
+                attr_val = attr_val.strip()
+                if attr_val:
+                    return attr_val
         return ""
 
     @staticmethod
@@ -242,9 +332,10 @@ class SPCClient:
             return -1
         if "isol" in s: return 2
         if "inhib" in s: return 3
-        if "ouvr" in s: return 1
-        if "activ" in s or "alarm" in s or "alarme" in s: return 1
-        if "normal" in s or "repos" in s: return 0
+        if "ouvr" in s or "open" in s: return 1
+        if "ferm" in s or "clos" in s or "close" in s: return 0
+        if "activ" in s or "alarm" in s or "alarme" in s or "alert" in s: return 1
+        if "normal" in s or "repos" in s or "rest" in s: return 0
         if "trouble" in s or "defaut" in s or "défaut" in s: return 4
         return -1
 
@@ -259,10 +350,14 @@ class SPCClient:
     @staticmethod
     def _map_area_state(txt):
         s = (txt or "").lower()
-        if "mes totale" in s: return 2
-        if "mes partiel" in s: return 3
-        if "mhs" in s or "désarm" in s: return 1
-        if "alarme" in s: return 4
+        if "mes totale" in s or "total" in s or "totale" in s: return 2
+        if "mes partiel" in s or "partiel" in s or "partial" in s: return 3
+        if "mhs" in s or "désarm" in s or "desarm" in s or "off" in s or "ready" in s:
+            return 1
+        if "alarme" in s or "alarm" in s or "alert" in s:
+            return 4
+        if "trouble" in s or "defaut" in s or "défaut" in s or "fault" in s:
+            return 4
         return 0
 
     def parse_zones(self, html):
@@ -271,47 +366,78 @@ class SPCClient:
         zones = []
         if not grid:
             return zones
+        zone_idx, sect_idx, entree_idx, etat_idx = 0, 1, 4, 5
+        header_labels = []
         for tr in grid.find_all("tr"):
-            tds = tr.find_all("td")
-            if len(tds) >= 6:
-                zname = tds[0].get_text(strip=True)
-                sect  = tds[1].get_text(strip=True)
-                entree_txt = self._extract_state_text(tds[4])
-                etat_txt   = self._extract_state_text(tds[5])
-                raw_entree, raw_etat = "", ""
-                if self.debug:
-                    try:
-                        raw_entree = tds[4].decode_contents().strip()
-                    except Exception:
-                        raw_entree = str(tds[4])
-                    try:
-                        raw_etat = tds[5].decode_contents().strip()
-                    except Exception:
-                        raw_etat = str(tds[5])
+            header_cells = tr.find_all("th")
+            if header_cells:
+                header_labels = [self._normalize_label(th.get_text(" ", strip=True)) for th in header_cells]
+                zone_idx = self._find_column(header_labels, ("zone", "libelle", "nom"), zone_idx)
+                sect_idx = self._find_column(header_labels, ("secteur", "partition", "area"), sect_idx)
+                entree_idx = self._find_column(header_labels, ("entree", "entrée", "input"), entree_idx)
+                etat_idx = self._find_column(header_labels, ("etat", "état", "state", "statut"), etat_idx)
+                continue
 
-                entree_code, entree_txt = self._infer_entree(tds[4], entree_txt, etat_txt)
-                if zname:
-                    zone_data = {
-                        "zone": zname,
-                        "secteur": sect,
-                        "entree_txt": entree_txt,
-                        "etat_txt": etat_txt,
-                        "entree": entree_code,
-                        "etat":   self._map_zone_state(etat_txt),
-                        "id":     self.zone_id_from_name(zname),
-                    }
-                    if self.debug and (entree_code == -1 or zone_data["etat"] == -1):
-                        logging.debug(
-                            "Zone '%s' parsed with raw_entree=%r raw_etat=%r -> entree_txt=%r etat_txt=%r code=%s etat=%s",
-                            zname,
-                            raw_entree,
-                            raw_etat,
-                            entree_txt,
-                            etat_txt,
-                            entree_code,
-                            zone_data["etat"],
-                        )
-                    zones.append(zone_data)
+            tds = tr.find_all("td")
+            if len(tds) < 2:
+                continue
+
+            zone_td = tds[zone_idx] if zone_idx is not None and zone_idx < len(tds) else tds[0]
+            sect_td = tds[sect_idx] if sect_idx is not None and sect_idx < len(tds) else (tds[1] if len(tds) > 1 else tds[0])
+
+            entree_td = None
+            etat_td = None
+            if len(tds) >= 6:
+                entree_td = tds[entree_idx] if entree_idx is not None and entree_idx < len(tds) else tds[-2]
+                etat_td = tds[etat_idx] if etat_idx is not None and etat_idx < len(tds) else tds[-1]
+            elif len(tds) >= 4:
+                entree_td = tds[-2]
+                etat_td = tds[-1]
+
+            zname = zone_td.get_text(strip=True)
+            sect = sect_td.get_text(strip=True)
+            entree_txt = self._extract_state_text(entree_td) if entree_td else ""
+            etat_txt = self._extract_state_text(etat_td) if etat_td else ""
+            raw_entree, raw_etat = "", ""
+            if self.debug and entree_td is not None and etat_td is not None:
+                try:
+                    raw_entree = entree_td.decode_contents().strip()
+                except Exception:
+                    raw_entree = str(entree_td)
+                try:
+                    raw_etat = etat_td.decode_contents().strip()
+                except Exception:
+                    raw_etat = str(etat_td)
+
+            entree_code, entree_txt = self._infer_entree(entree_td, entree_txt, etat_txt)
+            if not etat_txt:
+                etat_txt = entree_txt
+            etat_code = self._map_zone_state(etat_txt)
+            if etat_code == -1 and entree_code in (0, 1, 2, 3):
+                etat_code = entree_code
+
+            if zname:
+                zone_data = {
+                    "zone": zname,
+                    "secteur": sect,
+                    "entree_txt": entree_txt,
+                    "etat_txt": etat_txt,
+                    "entree": entree_code,
+                    "etat": etat_code,
+                    "id": self.zone_id_from_name(zname),
+                }
+                if self.debug and (entree_code == -1 or zone_data["etat"] == -1):
+                    logging.debug(
+                        "Zone '%s' parsed with raw_entree=%r raw_etat=%r -> entree_txt=%r etat_txt=%r code=%s etat=%s",
+                        zname,
+                        raw_entree,
+                        raw_etat,
+                        entree_txt,
+                        etat_txt,
+                        entree_code,
+                        zone_data["etat"],
+                    )
+                zones.append(zone_data)
         return zones
 
     def parse_areas(self, html):
@@ -322,6 +448,8 @@ class SPCClient:
             if len(tds) < 3: continue
             label = tds[1].get_text(strip=True)
             state = self._extract_state_text(tds[2])
+            if not state:
+                state = self._guess_area_state_label(" ".join(self._attr_values(tds[2])))
             if label.lower().startswith("secteur"):
                 m = re.match(r"^Secteur\s+(\d+)\s*:\s*(.+)$", label, re.I)
                 if m:
