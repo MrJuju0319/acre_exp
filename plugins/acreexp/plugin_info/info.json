@@ -1,0 +1,14 @@
+{
+  "id": "acreexp",
+  "name": "ACRE SPC",
+  "logicalId": "acreexp",
+  "category": "security",
+  "author": "Jeedom Community",
+  "license": "AGPL",
+  "description": "Pilote une centrale ACRE/Siemens SPC et synchronise automatiquement les secteurs et zones.",
+  "require": "4.4",
+  "hasDependency": false,
+  "hasOwnDeamon": true,
+  "changelog": "docs/changelog.md",
+  "documentation": "docs"
+}
