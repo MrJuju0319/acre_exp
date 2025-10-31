@@ -12,7 +12,7 @@ from typing import Dict
 try:
     from paho.mqtt import client as mqtt
 except Exception:
-    print("[ERREUR] paho-mqtt non disponible : /opt/spc-venv/bin/pip install 'paho-mqtt>=1.6' ")
+    print("[ERREUR] paho-mqtt non disponible : /opt/spc-venv/bin/pip install 'paho-mqtt>=2,<3'")
     sys.exit(1)
 
 try:
@@ -249,20 +249,35 @@ class MQ:
             "protocol": self.protocol,
         }
 
-        cb_v5 = getattr(CallbackAPIVersion, "V5", None) if CallbackAPIVersion else None
-        if cb_v5 is not None:
-            client_kwargs["callback_api_version"] = cb_v5
-        else:
-            print("[MQTT] Attention : paho-mqtt < 2 détecté — utilisation de l'API callbacks V3")
+        callback_version = None
+        if CallbackAPIVersion is not None:
+            for attr in ("V5", "V311", "V3"):
+                ver = getattr(CallbackAPIVersion, attr, None)
+                if ver is not None:
+                    callback_version = ver
+                    client_kwargs["callback_api_version"] = ver
+                    break
+        if callback_version is None:
+            print("[MQTT] Attention : API callbacks V3 utilisée (paho-mqtt ancien)")
 
         self.client = mqtt.Client(**client_kwargs)
 
-        def _on_connect(client, userdata, flags, reason_code, properties=None):
-            ok = (reason_code == 0)
-            self._set_conn(ok, reason_code)
+        def _normalize_reason_code(code):
+            if code is None:
+                return 0
+            value = getattr(code, "value", code)
+            try:
+                return int(value)
+            except Exception:
+                return 0
 
-        def _on_disconnect(client, userdata, reason_code, properties=None):
-            self._unset_conn(reason_code)
+        def _on_connect(client, userdata, flags, reason_code=0, *rest):
+            rc = _normalize_reason_code(reason_code)
+            self._set_conn(rc == 0, rc)
+
+        def _on_disconnect(client, userdata, reason_code=0, *rest):
+            rc = _normalize_reason_code(reason_code)
+            self._unset_conn(rc)
 
         if self.user:
             self.client.username_pw_set(self.user, self.pwd)
