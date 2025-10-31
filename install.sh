@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# =============================
+# ACRE SPC42 → MQTT installer
+# =============================
+
 C_RESET="\033[0m"; C_GREEN="\033[1;32m"; C_YELLOW="\033[1;33m"; C_BLUE="\033[1;34m"; C_RED="\033[1;31m"
 
+# --- chemins / noms ---
 REPO_URL="${REPO_URL:-https://github.com/MrJuju0319/acre_exp.git}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 SRC_DIR="/usr/local/src/acre_exp"
@@ -23,7 +28,7 @@ Usage:
   $0 --install [--yes]
   $0 --update
 
-Env vars:
+Variables optionnelles (peuvent être exportées avant exécution) :
   REPO_URL, REPO_BRANCH
   SPC_HOST, SPC_USER, SPC_PIN, SPC_LANG, MIN_LOGIN_INTERVAL
   MQTT_HOST, MQTT_PORT, MQTT_USER, MQTT_PASS, MQTT_BASE_TOPIC, MQTT_CLIENT_ID, MQTT_QOS, MQTT_RETAIN
@@ -57,11 +62,11 @@ if [[ ! -d "$SRC_DIR/.git" ]]; then
 else
   echo -e "${C_GREEN}>>> Mise à jour du dépôt${C_RESET} $SRC_DIR"
   git -C "$SRC_DIR" fetch --depth 1 origin "$REPO_BRANCH"
-  git -C "$SRC_DIR" reset --hard "origin/${REPO_BRANCH}"`
+  git -C "$SRC_DIR" reset --hard "origin/${REPO_BRANCH}"
 fi
 
 # --- venv ---
-echo -e "${C_GREEN}>>> Préparation du venv Python: ${VENV_DIR}${C_RESET}"
+echo -e "${C_GREEN}>>> Préparation du venv Python:${C_RESET} ${VENV_DIR}"
 if [[ ! -d "$VENV_DIR" ]]; then python3 -m venv "$VENV_DIR"; fi
 "${VENV_DIR}/bin/python" -m pip install --upgrade pip >/dev/null
 
@@ -77,7 +82,7 @@ assert hasattr(C, "V5"), "CallbackAPIVersion.V5 indisponible (paho-mqtt v2 atten
 print("paho-mqtt OK:", m.__version__)
 PY
 
-# --- Config (en --install) ---
+# --- Config (uniquement en --install) ---
 if [[ "${MODE}" == "--install" ]]; then
   write_cfg=true
   if [[ -f "$CFG_FILE" ]]; then
@@ -122,6 +127,7 @@ if [[ "${MODE}" == "--install" ]]; then
     WD_REFRESH="$(ask "Intervalle de refresh watchdog (sec)" "$WD_REFRESH_DEFAULT")"
     WD_LOG_CHANGES="$(ask "Logs des changements (true/false)" "$WD_LOG_DEFAULT")"
 
+    echo -e "${C_GREEN}>>> Écriture: ${CFG_FILE}${C_RESET}"
     cat > "$CFG_FILE" <<YAML
 spc:
   host: "${SPC_HOST}"
@@ -152,10 +158,16 @@ YAML
   fi
 fi
 
+# --- Installation des scripts (copie + shebangs venv) ---
 echo -e "${C_GREEN}>>> Installation des scripts${C_RESET}"
 install -m 0755 "$SRC_DIR/acre_exp_status.py"   "$BIN_STATUS"
 install -m 0755 "$SRC_DIR/acre_exp_watchdog.py" "$BIN_WATCHDOG"
 
+# Réécrit le 1er shebang pour pointer vers le Python du venv, sans options
+sed -i "1s|^#!.*python.*$|#!${VENV_DIR}/bin/python3|" "$BIN_STATUS"
+sed -i "1s|^#!.*python.*$|#!${VENV_DIR}/bin/python3|" "$BIN_WATCHDOG"
+
+# --- Service systemd ---
 echo -e "${C_GREEN}>>> Installation du service systemd${C_RESET}"
 cat > "$SERVICE_FILE" <<'SYSTEMD'
 [Unit]
