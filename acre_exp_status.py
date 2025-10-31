@@ -38,7 +38,6 @@ class SPCClient:
         self.cookiejar = MozillaCookieJar(self.cookie_file)
         self._load_cookies()
 
-    # --- cookies
     def _load_cookies(self):
         try:
             if os.path.exists(self.cookie_file):
@@ -55,7 +54,6 @@ class SPCClient:
         except Exception:
             pass
 
-    # --- http
     def _get(self, url, referer=None):
         headers = {}
         if referer:
@@ -68,13 +66,12 @@ class SPCClient:
     def _post(self, url, data, referer=None, allow_redirects=True):
         headers = {}
         if referer:
-            headers["Refer"] = referer
+            headers["Referer"] = referer
         r = self.session.post(url, data=data, allow_redirects=allow_redirects, timeout=8, headers=headers)
         r.raise_for_status()
         r.encoding = "utf-8"
         return r
 
-    # --- session cache
     def _load_session_cache(self):
         if not os.path.exists(self.session_file):
             return {}
@@ -91,7 +88,8 @@ class SPCClient:
         except Exception:
             pass
 
-    def _extract_session(self, text_or_url):
+    @staticmethod
+    def _extract_session(text_or_url):
         if not text_or_url:
             return ""
         m = re.search(r"[?&]session=([0-9A-Za-zx]+)", text_or_url)
@@ -100,7 +98,8 @@ class SPCClient:
         m = re.search(r"secure\.htm\?[^\"'>]*session=([0-9A-Za-zx]+)", text_or_url)
         return m.group(1) if m else ""
 
-    def _is_login_response(self, resp_text: str, resp_url: str, expect_table: bool) -> bool:
+    @staticmethod
+    def _is_login_response(resp_text: str, resp_url: str, expect_table: bool) -> bool:
         if resp_url and "login.htm" in resp_url.lower():
             return True
         if not expect_table:
@@ -225,7 +224,6 @@ class SPCClient:
             r = self._get(url, referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
             return sid, r
 
-        # ZONES
         sid, r_z = _fetch("status_zones")
         logging.debug("Requesting zones from: %s (len=%d)", r_z.url, len(r_z.text))
         zones = self.parse_zones(r_z.text)
@@ -234,12 +232,11 @@ class SPCClient:
             new_sid = self._do_login()
             if new_sid:
                 sid = new_sid
-                url = f"{self.host}/secure.htm?session={sid}&page=status_zones"
-                r_z = self._get(url, referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
+                r_z = self._get(f"{self.host}/secure.htm?session={sid}&page=status_zones",
+                                 referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
                 zones = self.parse_zones(r_z.text)
                 logging.debug("zones retry length: %d — parsed: %d", len(r_z.text), len(zones))
 
-        # AREAS
         sid, r_a = _fetch("spc_home")
         logging.debug("Requesting areas from: %s (len=%d)", r_a.url, len(r_a.text))
         areas = self.parse_areas(r_a.text)
@@ -248,15 +245,14 @@ class SPCClient:
             new_sid = self._do_login()
             if new_sid:
                 sid = new_sid
-                url = f"{self.host}/secure.htm?session={sid}&page=spc_home"
-                r_a = self._get(url, referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
+                r_a = self._get(f"{self.host}/secure.htm?session={sid}&page=spc_home",
+                                 referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
                 areas = self.parse_areas(r_a.text)
                 logging.debug("areas retry length: %d — parsed: %d", len(r_a.text), len(areas))
 
         self._save_cookies()
         self._save_session_cache(sid)
         return {"zones": zones, "areas": areas}
-
 
 def main():
     parser = argparse.ArgumentParser()
