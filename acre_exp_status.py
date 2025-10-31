@@ -134,32 +134,61 @@ class SPCClient:
 
     @staticmethod
     def _extract_state_text(td):
-        txt = td.get_text(strip=True)
-        if txt:
-            return txt
-        img = td.find("img")
-        if img:
-            alt = (img.get("alt") or "").strip()
-            if alt:
-                return alt
-            title = (img.get("title") or "").strip()
-            if title:
-                return title
+        if td is None:
+            return ""
+        # privilégier le texte brut présent dans la cellule, en supprimant les
+        # éventuels espaces ou sauts de ligne superflus.
+        pieces = [s.strip() for s in td.stripped_strings if s.strip()]
+        if pieces:
+            return " ".join(pieces)
+
+        # certains états peuvent être représentés via une icône ou un attribut.
+        for tag_name in ("img", "span", "i"):
+            node = td.find(tag_name)
+            if not node:
+                continue
+            for attr in ("alt", "title", "data-state"):
+                val = (node.get(attr) or "").strip()
+                if val:
+                    return val
+
+        # à défaut, tenter les attributs directement sur la cellule.
+        for attr in ("data-state", "title", "aria-label"):
+            val = (td.get(attr) or "").strip()
+            if val:
+                return val
         return ""
 
     @staticmethod
     def _map_entree(txt):
-        s = (txt or "").lower()
-        if "ferm" in s: return 1
-        if "ouvert" in s: return 0
+        s = (txt or "").strip().lower()
+        if not s:
+            return -1
+        if "isol" in s: return 2
+        if "inhib" in s: return 3
+        if "ferm" in s: return 0
+        if "ouvr" in s: return 1
         return -1
 
     @staticmethod
     def _map_zone_state(txt):
-        s = (txt or "").lower()
-        if "normal" in s: return 1
-        if "activ"  in s: return 2
+        s = (txt or "").strip().lower()
+        if not s:
+            return -1
+        if "isol" in s: return 2
+        if "inhib" in s: return 3
+        if "activ" in s or "alarm" in s or "alarme" in s: return 1
+        if "normal" in s or "repos" in s: return 0
+        if "trouble" in s or "defaut" in s or "défaut" in s: return 4
         return -1
+
+    @staticmethod
+    def zone_id_from_name(name: str) -> str:
+        m = re.match(r"^\s*(\d+)\b", name or "")
+        if m:
+            return m.group(1)
+        slug = re.sub(r"[^a-zA-Z0-9]+", "_", name or "").strip("_").lower()
+        return slug or "unknown"
 
     @staticmethod
     def _map_area_state(txt):
@@ -191,6 +220,7 @@ class SPCClient:
                         "etat_txt": etat_txt,
                         "entree": self._map_entree(entree_txt),
                         "etat":   self._map_zone_state(etat_txt),
+                        "id":     self.zone_id_from_name(zname),
                     })
         return zones
 
@@ -210,7 +240,8 @@ class SPCClient:
                         "secteur": f"{num} {nom}",
                         "nom": nom,
                         "etat_txt": state,
-                        "etat": self._map_area_state(state)
+                        "etat": self._map_area_state(state),
+                        "sid": num,
                     })
         return areas
 
