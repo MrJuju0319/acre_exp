@@ -68,7 +68,7 @@ class SPCClient:
     def _post(self, url, data, referer=None, allow_redirects=True):
         headers = {}
         if referer:
-            headers["Referer"] = referer
+            headers["Refer"] = referer
         r = self.session.post(url, data=data, allow_redirects=allow_redirects, timeout=8, headers=headers)
         r.raise_for_status()
         r.encoding = "utf-8"
@@ -91,13 +91,7 @@ class SPCClient:
         except Exception:
             pass
 
-    def _last_login_too_recent(self):
-        d = self._load_session_cache()
-        t = d.get("time", 0)
-        return (time.time() - float(t)) < self.min_login_interval
-
-    @staticmethod
-    def _extract_session(text_or_url):
+    def _extract_session(self, text_or_url):
         if not text_or_url:
             return ""
         m = re.search(r"[?&]session=([0-9A-Za-zx]+)", text_or_url)
@@ -106,8 +100,7 @@ class SPCClient:
         m = re.search(r"secure\.htm\?[^\"'>]*session=([0-9A-Za-zx]+)", text_or_url)
         return m.group(1) if m else ""
 
-    @staticmethod
-    def _is_login_response(resp_text: str, resp_url: str, expect_table: bool) -> bool:
+    def _is_login_response(self, resp_text: str, resp_url: str, expect_table: bool) -> bool:
         if resp_url and "login.htm" in resp_url.lower():
             return True
         if not expect_table:
@@ -140,7 +133,21 @@ class SPCClient:
             return sid
         return self._do_login()
 
-    # --- parsing helpers
+    @staticmethod
+    def _extract_state_text(td):
+        txt = td.get_text(strip=True)
+        if txt:
+            return txt
+        img = td.find("img")
+        if img:
+            alt = (img.get("alt") or "").strip()
+            if alt:
+                return alt
+            title = (img.get("title") or "").strip()
+            if title:
+                return title
+        return ""
+
     @staticmethod
     def _map_entree(txt):
         s = (txt or "").lower()
@@ -163,21 +170,6 @@ class SPCClient:
         if "mhs" in s or "désarm" in s: return 1
         if "alarme" in s: return 4
         return 0
-
-    @staticmethod
-    def _extract_state_text(td):
-        txt = td.get_text(strip=True)
-        if txt:
-            return txt
-        img = td.find("img")
-        if img:
-            alt = (img.get("alt") or "").strip()
-            if alt:
-                return alt
-            title = (img.get("title") or "").strip()
-            if title:
-                return title
-        return ""
 
     def parse_zones(self, html):
         soup = BeautifulSoup(html, "html.parser")
@@ -272,7 +264,6 @@ def main():
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
-    # logs debug -> stderr, JSON -> stdout
     logging.basicConfig(stream=sys.stderr, level=(logging.DEBUG if args.debug else logging.WARNING),
                         format="%(levelname)s:%(message)s")
 
