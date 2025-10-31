@@ -1,22 +1,19 @@
 #!/opt/spc-venv/bin/python3
 # -*- coding: utf-8 -*-
 
-import os, re, sys, time, json, argparse, signal
+import os, re, sys, time, json, argparse, signal, logging
 import yaml
 import requests
 from bs4 import BeautifulSoup
 from http.cookiejar import MozillaCookieJar
-from typing import Dict, Optional
+from typing import Dict
 
+# === paho-mqtt v2.x, API V5 imposée ===
 try:
     from paho.mqtt import client as mqtt
-    try:
-        from paho.mqtt.client import CallbackAPIVersion
-        HAVE_V5 = True
-    except Exception:
-        HAVE_V5 = False
+    from paho.mqtt.client import CallbackAPIVersion
 except Exception:
-    print("[ERREUR] paho-mqtt non installé : /opt/spc-venv/bin/pip install paho-mqtt")
+    print("[ERREUR] paho-mqtt v2.x requis : /opt/spc-venv/bin/pip install 'paho-mqtt>=2,<3'")
     sys.exit(1)
 
 def load_cfg(path: str):
@@ -44,8 +41,7 @@ class SPCClient:
 
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                          "(KHTML, like Gecko) Chrome/118.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0 Safari/537.36",
             "Connection": "keep-alive",
         })
         self.cookiejar = MozillaCookieJar(self.cookie_file)
@@ -127,8 +123,7 @@ class SPCClient:
         return has_user and has_pass
 
     def _do_login(self) -> str:
-        if self.debug:
-            print("[DEBUG] Performing login…")
+        logging.debug("Performing login…")
         try:
             self._get(f"{self.host}/login.htm")
         except Exception:
@@ -136,8 +131,7 @@ class SPCClient:
         url = f"{self.host}/login.htm?action=login&language={self.lang}"
         r = self._post(url, {"userid": self.user, "password": self.pin}, allow_redirects=True)
         sid = self._extract_session(r.url) or self._extract_session(r.text)
-        if self.debug:
-            print(f"[DEBUG] Login got SID={sid or '(none)'}")
+        logging.debug("Login got SID=%s", sid or "(none)")
         if sid:
             self._save_session_cache(sid)
             self._save_cookies()
@@ -227,51 +221,38 @@ class SPCClient:
 
         def _fetch(page: str):
             url = f"{self.host}/secure.htm?session={sid}&page={page}"
-            if self.debug:
-                print(f"[DEBUG] Using SID={sid}")
-                print(f"[DEBUG] Requesting {page} from: {url}")
+            logging.debug("Requesting %s from: %s", page, url)
             r = self._get(url, referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
-            if self.debug:
-                print(f"[DEBUG] {page} page length: {len(r.text)} bytes")
+            logging.debug("%s page length: %d bytes", page, len(r.text))
             return sid, r
 
         # ZONES
         sid, r_z = _fetch("status_zones")
         zones = self.parse_zones(r_z.text)
-        if self.debug:
-            print(f"[DEBUG] Parsed zones count: {len(zones)}")
-            if zones: print(f"[DEBUG] First zone: {zones[0]}")
+        logging.debug("Parsed zones count: %d", len(zones))
         if len(zones) == 0 and self._is_login_response(r_z.text, getattr(r_z, "url", ""), True):
-            if self.debug:
-                print("[DEBUG] Zones parse empty + looks like login — re-login once")
+            logging.debug("Zones parse empty + looks like login — re-login once")
             new_sid = self._do_login()
             if new_sid:
                 sid = new_sid
                 url = f"{self.host}/secure.htm?session={sid}&page=status_zones"
                 r_z = self._get(url, referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
                 zones = self.parse_zones(r_z.text)
-                if self.debug:
-                    print(f"[DEBUG] status_zones retry length: {len(r_z.text)} bytes")
-                    print(f"[DEBUG] Parsed zones after relogin: {len(zones)}")
+                logging.debug("status_zones retry length: %d — parsed: %d", len(r_z.text), len(zones))
 
         # AREAS
         sid, r_a = _fetch("spc_home")
         areas = self.parse_areas(r_a.text)
-        if self.debug:
-            print(f"[DEBUG] Parsed areas count: {len(areas)}")
-            if areas: print(f"[DEBUG] First area: {areas[0]}")
+        logging.debug("Parsed areas count: %d", len(areas))
         if len(areas) == 0 and self._is_login_response(r_a.text, getattr(r_a, "url", ""), True):
-            if self.debug:
-                print("[DEBUG] Areas parse empty + looks like login — re-login once")
+            logging.debug("Areas parse empty + looks like login — re-login once")
             new_sid = self._do_login()
             if new_sid:
                 sid = new_sid
                 url = f"{self.host}/secure.htm?session={sid}&page=spc_home"
                 r_a = self._get(url, referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
                 areas = self.parse_areas(r_a.text)
-                if self.debug:
-                    print(f"[DEBUG] spc_home retry length: {len(r_a.text)} bytes")
-                    print(f"[DEBUG] Parsed areas after relogin: {len(areas)}")
+                logging.debug("spc_home retry length: %d — parsed: %d", len(r_a.text), len(areas))
 
         self._save_cookies()
         self._save_session_cache(sid)
@@ -289,25 +270,23 @@ class MQ:
         self.qos  = int(m.get("qos", 0))
         self.retain = bool(m.get("retain", True))
         self.client_id = m.get("client_id", "spc42-watchdog")
+        # Optionnel : protocole MQTT (v311 par défaut pour compatibilité large)
+        proto = str(m.get("protocol", "v311")).lower()
+        self.protocol = mqtt.MQTTv5 if proto in ("v5", "mqttv5", "5") else mqtt.MQTTv311
 
-        if HAVE_V5:
-            self.client = mqtt.Client(
-                client_id=self.client_id,
-                protocol=mqtt.MQTTv311,
-                callback_api_version=CallbackAPIVersion.V5,
-            )
-            def _on_connect(client, userdata, flags, reason_code, properties):
-                ok = (reason_code == 0)
-                self._set_conn(ok, reason_code)
-            def _on_disconnect(client, userdata, reason_code, properties):
-                self._unset_conn(reason_code)
-        else:
-            # fallback v1 (peut afficher un DeprecationWarning selon la version)
-            self.client = mqtt.Client(client_id=self.client_id, protocol=mqtt.MQTTv311)
-            def _on_connect(client, userdata, flags, rc):
-                self._set_conn(rc == 0, rc)
-            def _on_disconnect(client, userdata, rc):
-                self._unset_conn(rc)
+        # paho v2.x + API V5 => signatures modernes
+        self.client = mqtt.Client(
+            client_id=self.client_id,
+            protocol=self.protocol,
+            callback_api_version=CallbackAPIVersion.V5,
+        )
+
+        def _on_connect(client, userdata, flags, reason_code, properties):
+            ok = (reason_code == 0)
+            self._set_conn(ok, reason_code)
+
+        def _on_disconnect(client, userdata, reason_code, properties):
+            self._unset_conn(reason_code)
 
         if self.user:
             self.client.username_pw_set(self.user, self.pwd)
@@ -351,6 +330,9 @@ def main() -> None:
     ap.add_argument("--debug", action="store_true",
                     help="activer les logs détaillés (HTTP, parse, relogin)")
     args = ap.parse_args()
+
+    logging.basicConfig(stream=sys.stderr, level=(logging.DEBUG if args.debug else logging.INFO),
+                        format="%(levelname)s:%(message)s")
 
     cfg = load_cfg(args.config)
     wd  = cfg.get("watchdog", {})
