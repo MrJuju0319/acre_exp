@@ -1,7 +1,7 @@
 #!/opt/spc-venv/bin/python3
 # -*- coding: utf-8 -*-
 
-import os, re, sys, time, json, argparse, signal, logging
+import os, re, sys, time, json, argparse, signal, logging, warnings
 import yaml
 import requests
 from bs4 import BeautifulSoup
@@ -335,7 +335,15 @@ class MQ:
         if callback_version is None:
             print("[MQTT] Attention : API callbacks V3 utilisée (paho-mqtt ancien)")
 
-        self.client = mqtt.Client(**client_kwargs)
+        with warnings.catch_warnings():
+            if callback_version is None:
+                warnings.filterwarnings(
+                    "ignore",
+                    message="Callback API version 1 is deprecated, update to latest version",
+                    category=DeprecationWarning,
+                    module="paho.mqtt.client",
+                )
+            self.client = mqtt.Client(**client_kwargs)
 
         def _normalize_reason_code(code):
             if code is None:
