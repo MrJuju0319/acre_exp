@@ -8,13 +8,17 @@ from bs4 import BeautifulSoup
 from http.cookiejar import MozillaCookieJar
 from typing import Dict
 
-# paho-mqtt v2.x, API V5 requise
+# paho-mqtt v2.x (API V5) recommandé — compatibilité assurée avec v1.x
 try:
     from paho.mqtt import client as mqtt
+except Exception:
+    print("[ERREUR] paho-mqtt non disponible : /opt/spc-venv/bin/pip install 'paho-mqtt>=2,<3'")
+    sys.exit(1)
+
+try:
     from paho.mqtt.client import CallbackAPIVersion
 except Exception:
-    print("[ERREUR] paho-mqtt v2.x requis : /opt/spc-venv/bin/pip install 'paho-mqtt>=2,<3'")
-    sys.exit(1)
+    CallbackAPIVersion = None  # paho-mqtt < 1.6
 
 def load_cfg(path: str):
     with open(path, "r", encoding="utf-8") as f:
@@ -97,6 +101,81 @@ class SPCClient:
                 json.dump({"session": sid, "time": time.time()}, f)
         except Exception:
             pass
+
+    def _last_login_too_recent(self) -> bool:
+        try:
+            data = self._load_session_cache()
+            last = float(data.get("time", 0) or 0)
+        except Exception:
+            last = 0.0
+        delta = time.time() - last
+        too_recent = delta < self.min_login_interval
+        if too_recent and self.debug:
+            logging.debug("Dernière tentative de login il y a %.1fs — attente min %ss", delta, self.min_login_interval)
+        return too_recent
+
+    def _session_valid(self, sid: str) -> bool:
+        if not sid:
+            return False
+        try:
+            url = f"{self.host}/secure.htm?session={sid}&page=spc_home"
+            r = self._get(url, referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
+        except Exception:
+            if self.debug:
+                logging.debug("Validation session %s impossible (erreur requête)", sid, exc_info=True)
+            return False
+
+        if self._is_login_response(r.text, getattr(r, "url", ""), True):
+            if self.debug:
+                logging.debug("Session %s invalide : page de login renvoyée", sid)
+            return False
+
+        if self.debug:
+            logging.debug("Session %s toujours valide", sid)
+        return True
+
+    def _do_login(self) -> str:
+        if self.debug:
+            logging.debug("Connexion SPC…")
+        try:
+            self._get(f"{self.host}/login.htm")
+        except Exception:
+            if self.debug:
+                logging.debug("Pré-chargement login.htm échoué", exc_info=True)
+        url = f"{self.host}/login.htm?action=login&language={self.lang}"
+        try:
+            r = self._post(
+                url,
+                {"userid": self.user, "password": self.pin},
+                allow_redirects=True,
+                referer=f"{self.host}/login.htm",
+            )
+        except Exception:
+            if self.debug:
+                logging.debug("POST login échoué", exc_info=True)
+            return ""
+
+        sid = self._extract_session(getattr(r, "url", "")) or self._extract_session(r.text)
+        if self.debug:
+            logging.debug("Login SID=%s", sid or "(aucun)")
+        if sid:
+            self._save_session_cache(sid)
+            self._save_cookies()
+            return sid
+        return ""
+
+    def get_or_login(self) -> str:
+        data = self._load_session_cache()
+        sid = data.get("session", "")
+        if sid and self._session_valid(sid):
+            return sid
+
+        if self._last_login_too_recent():
+            time.sleep(2)
+            if sid and self._session_valid(sid):
+                return sid
+
+        return self._do_login()
 
     @staticmethod
     def _extract_session(text_or_url):
@@ -240,18 +319,40 @@ class MQ:
         proto = str(m.get("protocol", "v311")).lower()
         self.protocol = mqtt.MQTTv5 if proto in ("v5", "mqttv5", "5") else mqtt.MQTTv311
 
-        self.client = mqtt.Client(
-            client_id=self.client_id,
-            protocol=self.protocol,
-            callback_api_version=CallbackAPIVersion.V5,
-        )
+        client_kwargs = {
+            "client_id": self.client_id,
+            "protocol": self.protocol,
+        }
 
-        def _on_connect(client, userdata, flags, reason_code, properties):
-            ok = (reason_code == 0)
-            self._set_conn(ok, reason_code)
+        callback_version = None
+        if CallbackAPIVersion is not None:
+            for attr in ("V5", "V311", "V3"):
+                ver = getattr(CallbackAPIVersion, attr, None)
+                if ver is not None:
+                    callback_version = ver
+                    client_kwargs["callback_api_version"] = ver
+                    break
+        if callback_version is None:
+            print("[MQTT] Attention : API callbacks V3 utilisée (paho-mqtt ancien)")
 
-        def _on_disconnect(client, userdata, reason_code, properties):
-            self._unset_conn(reason_code)
+        self.client = mqtt.Client(**client_kwargs)
+
+        def _normalize_reason_code(code):
+            if code is None:
+                return 0
+            value = getattr(code, "value", code)
+            try:
+                return int(value)
+            except Exception:
+                return 0
+
+        def _on_connect(client, userdata, flags, reason_code=0, *rest):
+            rc = _normalize_reason_code(reason_code)
+            self._set_conn(rc == 0, rc)
+
+        def _on_disconnect(client, userdata, reason_code=0, *rest):
+            rc = _normalize_reason_code(reason_code)
+            self._unset_conn(rc)
 
         if self.user:
             self.client.username_pw_set(self.user, self.pwd)
