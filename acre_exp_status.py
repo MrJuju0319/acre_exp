@@ -1,7 +1,7 @@
 #!/opt/spc-venv/bin/python3
 # -*- coding: utf-8 -*-
 
-import os, re, sys, json, time, pathlib, argparse
+import os, re, sys, json, time, pathlib, argparse, logging
 import requests
 from bs4 import BeautifulSoup
 from http.cookiejar import MozillaCookieJar
@@ -32,8 +32,7 @@ class SPCClient:
 
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                          "(KHTML, like Gecko) Chrome/118.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0 Safari/537.36",
             "Connection": "keep-alive",
         })
         self.cookiejar = MozillaCookieJar(self.cookie_file)
@@ -109,7 +108,6 @@ class SPCClient:
 
     @staticmethod
     def _is_login_response(resp_text: str, resp_url: str, expect_table: bool) -> bool:
-        # vrai login si URL login.htm, ou si formulaire userid/password détecté
         if resp_url and "login.htm" in resp_url.lower():
             return True
         if not expect_table:
@@ -120,8 +118,7 @@ class SPCClient:
         return has_user and has_pass
 
     def _do_login(self):
-        if self.debug:
-            print("[DEBUG] Performing login…")
+        logging.debug("Performing login…")
         try:
             self._get(urljoin(self.host, "/login.htm"))
         except Exception:
@@ -129,8 +126,7 @@ class SPCClient:
         url = f"{self.host}/login.htm?action=login&language={self.lang}"
         r = self._post(url, {"userid": self.user, "password": self.pin}, allow_redirects=True)
         sid = self._extract_session(r.url) or self._extract_session(r.text)
-        if self.debug:
-            print(f"[DEBUG] Login got SID={sid or '(none)'}")
+        logging.debug("Login got SID=%s", sid or "(none)")
         if sid:
             self._save_session_cache(sid)
             self._save_cookies()
@@ -239,39 +235,31 @@ class SPCClient:
 
         # ZONES
         sid, r_z = _fetch("status_zones")
-        if self.debug:
-            print(f"[DEBUG] Requesting zones from: {r_z.url}")
-            print(f"[DEBUG] zones page length: {len(r_z.text)} bytes")
+        logging.debug("Requesting zones from: %s (len=%d)", r_z.url, len(r_z.text))
         zones = self.parse_zones(r_z.text)
         if len(zones) == 0 and self._is_login_response(r_z.text, getattr(r_z, "url", ""), True):
-            if self.debug:
-                print("[DEBUG] Zones parse empty + looks like login — re-login once")
+            logging.debug("Zones parse empty + looks like login — re-login once")
             new_sid = self._do_login()
             if new_sid:
                 sid = new_sid
                 url = f"{self.host}/secure.htm?session={sid}&page=status_zones"
                 r_z = self._get(url, referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
                 zones = self.parse_zones(r_z.text)
-                if self.debug:
-                    print(f"[DEBUG] zones retry length: {len(r_z.text)} bytes — parsed: {len(zones)}")
+                logging.debug("zones retry length: %d — parsed: %d", len(r_z.text), len(zones))
 
         # AREAS
         sid, r_a = _fetch("spc_home")
-        if self.debug:
-            print(f"[DEBUG] Requesting areas from: {r_a.url}")
-            print(f"[DEBUG] areas page length: {len(r_a.text)} bytes")
+        logging.debug("Requesting areas from: %s (len=%d)", r_a.url, len(r_a.text))
         areas = self.parse_areas(r_a.text)
         if len(areas) == 0 and self._is_login_response(r_a.text, getattr(r_a, "url", ""), True):
-            if self.debug:
-                print("[DEBUG] Areas parse empty + looks like login — re-login once")
+            logging.debug("Areas parse empty + looks like login — re-login once")
             new_sid = self._do_login()
             if new_sid:
                 sid = new_sid
                 url = f"{self.host}/secure.htm?session={sid}&page=spc_home"
                 r_a = self._get(url, referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
                 areas = self.parse_areas(r_a.text)
-                if self.debug:
-                    print(f"[DEBUG] areas retry length: {len(r_a.text)} bytes — parsed: {len(areas)}")
+                logging.debug("areas retry length: %d — parsed: %d", len(r_a.text), len(areas))
 
         self._save_cookies()
         self._save_session_cache(sid)
@@ -284,13 +272,17 @@ def main():
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
+    # logs debug -> stderr, JSON -> stdout
+    logging.basicConfig(stream=sys.stderr, level=(logging.DEBUG if args.debug else logging.WARNING),
+                        format="%(levelname)s:%(message)s")
+
     try:
         cfg = load_cfg(args.config)
         client = SPCClient(cfg, debug=args.debug)
         data = client.fetch_status()
-        print(json.dumps(data, ensure_ascii=False, indent=2))
+        sys.stdout.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
     except Exception as e:
-        print(json.dumps({"error": str(e)}))
+        sys.stdout.write(json.dumps({"error": str(e)}) + "\n")
 
 if __name__ == "__main__":
     try:
