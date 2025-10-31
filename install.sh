@@ -1,5 +1,4 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#! /usr/bin/env -S bash -euo pipefail
 
 # =============================
 # ACRE SPC42 → MQTT installer
@@ -227,3 +226,4 @@ echo -e "Logs:     ${C_YELLOW}journalctl -u acre-exp-watchdog.service -f -n 100$
 echo -e "Test JSON:${C_YELLOW}${BIN_STATUS} -c ${CFG_FILE} | jq .${C_RESET}"
 echo -e "MQTT sub: ${C_YELLOW}mosquitto_sub -h \${MQTT_HOST:-127.0.0.1} -t '\${MQTT_BASE_TOPIC:-acre_XXX}/#' -v${C_RESET}"
 line
+
