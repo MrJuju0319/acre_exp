@@ -51,6 +51,12 @@ journalctl -u acre-exp-watchdog.service -f -n 100
 mosquitto_sub -h 127.0.0.1 -t 'acre_XXX/#' -v
 ```
 
+### Topics MQTT publiés
+
+* `acre_XXX/zones/<id>/state` — 0 = zone normale, 1 = zone activée.
+* `acre_XXX/zones/<id>/entree` — 1 = entrée fermée, 0 = entrée ouverte/alarme.
+* `acre_XXX/secteurs/<id>/state` — 0 = inconnu, 1 = désarmé, 2 = MES totale, 3 = MES partielle, 4 = alarme.
+
 ## 🧹 Désinstallation
 
 ```bash

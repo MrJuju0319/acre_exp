@@ -201,21 +201,75 @@ class SPCClient:
 
     @staticmethod
     def _extract_state_text(td):
+        if td is None:
+            return ""
+
         txt = td.get_text(strip=True)
-        if txt: return txt
-        img = td.find("img")
-        if img:
-            alt = (img.get("alt") or "").strip()
-            if alt: return alt
-            title = (img.get("title") or "").strip()
-            if title: return title
+        if txt:
+            return txt
+
+        attr_names = (
+            "data-original-title",
+            "data-bs-original-title",
+            "title",
+            "aria-label",
+            "data-title",
+            "data-tooltip",
+            "data-content",
+        )
+
+        def _from_attrs(tag):
+            for attr in attr_names:
+                val = tag.get(attr)
+                if val:
+                    val = val.strip()
+                    if val:
+                        return val
+            return ""
+
+        direct = _from_attrs(td)
+        if direct:
+            return direct
+
+        for child in td.find_all(True):
+            val = _from_attrs(child)
+            if val:
+                return val
+
+            if child.name == "img":
+                src = (child.get("src") or "").lower()
+                if src:
+                    if any(k in src for k in ("open", "alarm", "trouble", "active")):
+                        return "ouverte"
+                    if any(k in src for k in ("closed", "secure", "normal", "inactive")):
+                        return "fermée"
+
+                classes = child.get("class") or []
+                if classes:
+                    joined = " ".join(classes).lower()
+                    if any(k in joined for k in ("open", "alarm", "trouble", "active")):
+                        return "ouverte"
+                    if any(k in joined for k in ("closed", "secure", "normal", "inactive")):
+                        return "fermée"
+
+            else:
+                classes = child.get("class") or []
+                if classes:
+                    joined = " ".join(classes).lower()
+                    if "normal" in joined:
+                        return "normal"
+                    if any(k in joined for k in ("alarm", "trouble", "open", "active")):
+                        return "alarme"
+
         return ""
 
     @staticmethod
     def zone_bin(etat_txt: str) -> int:
         s = (etat_txt or "").lower()
-        if "normal" in s: return 0
-        if "activ"  in s: return 1
+        if any(k in s for k in ("normal", "secure", "ferm")):
+            return 0
+        if any(k in s for k in ("activ", "alar", "ouvert", "troubl", "fault", "tamper")):
+            return 1
         return -1
 
     @staticmethod
@@ -244,10 +298,25 @@ class SPCClient:
             if len(tds) >= 6:
                 zname = tds[0].get_text(strip=True)
                 sect  = tds[1].get_text(strip=True)
+                entree_txt = self._extract_state_text(tds[4])
                 etat_txt = self._extract_state_text(tds[5])
                 if zname:
-                    zones.append({"zname": zname, "sect": sect, "etat_txt": etat_txt})
+                    zones.append({
+                        "zname": zname,
+                        "sect": sect,
+                        "entree_txt": entree_txt,
+                        "etat_txt": etat_txt,
+                    })
         return zones
+
+    @staticmethod
+    def zone_input(entree_txt: str) -> int:
+        s = (entree_txt or "").lower()
+        if any(k in s for k in ("ferm", "close", "secure", "normal")):
+            return 1
+        if any(k in s for k in ("ouvert", "open", "alarm", "troubl", "fault")):
+            return 0
+        return -1
 
     def parse_areas(self, html):
         soup = BeautifulSoup(html, "html.parser")
@@ -419,6 +488,7 @@ def main() -> None:
     mq.connect()
 
     last_z: Dict[str, int] = {}
+    last_z_in: Dict[str, int] = {}
     last_a: Dict[str, int] = {}
 
     running = True
@@ -438,6 +508,10 @@ def main() -> None:
         if b in (0,1):
             last_z[zid] = b
             mq.pub(f"zones/{zid}/state", b)
+        entree = SPCClient.zone_input(z.get("entree_txt"))
+        if entree in (0,1):
+            last_z_in[zid] = entree
+            mq.pub(f"zones/{zid}/entree", entree)
 
     for a in snap["areas"]:
         sid = a["sid"]
@@ -468,6 +542,16 @@ def main() -> None:
                 last_z[zid] = b
                 if log_changes:
                     print(f"[{tick}] 🟡 Zone '{z['zname']}' → {b}")
+
+            entree = SPCClient.zone_input(z.get("entree_txt"))
+            if entree in (0,1):
+                old_in = last_z_in.get(zid)
+                if old_in is None or entree != old_in:
+                    mq.pub(f"zones/{zid}/entree", entree)
+                    last_z_in[zid] = entree
+                    if log_changes:
+                        state_txt = "fermée" if entree == 1 else "ouverte"
+                        print(f"[{tick}] 🟢 Entrée zone '{z['zname']}' → {state_txt}")
 
         for a in data["areas"]:
             sid = a["sid"]
