@@ -127,9 +127,10 @@ class SPCClient(StatusSPCClient):
             return False
         low = resp_text.lower()
         has_user = ('name="userid"' in low) or ('id="userid"' in low) or ("id='userid'" in low)
-        # >>> BUG FIX: quotes corrigés (pas de " au milieu) <<<
         has_pass = ('name="password"' in low) or ('id="password"' in low) or ("id='password'" in low)
-        return has_user and has_pass
+        if has_user and has_pass:
+            return True
+        return "utilisateur déconnecté" in low
 
     @staticmethod
     def _normalize_state_text(txt: str) -> str:
@@ -140,19 +141,21 @@ class SPCClient(StatusSPCClient):
         if isinstance(zone, dict):
             etat = zone.get("etat")
             if isinstance(etat, int):
-                if etat <= 1:
-                    return 0 if etat == 1 else -1
-                if etat >= 2:
+                if etat == 1:
+                    return 1
+                if etat in (0, 2, 3):
+                    return 0
+                if etat >= 4:
                     return 1
             etat_txt = zone.get("etat_txt")
         else:
             etat_txt = zone
 
         s = cls._normalize_state_text(etat_txt)
-        if "normal" in s:
-            return 0
-        if "activ" in s or "alarm" in s or "alarme" in s or "trouble" in s:
+        if any(x in s for x in ("activ", "alarm", "alarme", "trouble", "défaut", "defaut")):
             return 1
+        if any(x in s for x in ("normal", "repos", "isol", "inhib")):
+            return 0
         return -1
 
     @classmethod
@@ -204,17 +207,34 @@ class SPCClient(StatusSPCClient):
     def zone_input(zone) -> int:
         if isinstance(zone, dict):
             entree = zone.get("entree")
-            if isinstance(entree, int) and entree in (0, 1):
+            if isinstance(entree, int) and entree in (0, 1, 2, 3):
                 return entree
             entree_txt = zone.get("entree_txt")
+            etat_val = zone.get("etat") if isinstance(zone.get("etat"), int) else None
         else:
             entree_txt = zone
+            etat_val = None
 
         s = SPCClient._normalize_state_text(entree_txt)
+        if "isol" in s:
+            return 2
+        if "inhib" in s:
+            return 3
         if "ferm" in s:
-            return 1
-        if "ouvert" in s or "alarm" in s:
             return 0
+        if "ouvr" in s or "alarm" in s:
+            return 1
+        if etat_val is not None:
+            if etat_val == 2:
+                return 2
+            if etat_val == 3:
+                return 3
+            if etat_val == 1:
+                return 1
+            if etat_val == 0:
+                return 0
+            if etat_val >= 4:
+                return 1
         return -1
 
     @staticmethod
@@ -392,7 +412,7 @@ def main() -> None:
             last_z[zid] = b
             mq.pub(f"zones/{zid}/state", b)
         entree = SPCClient.zone_input(z)
-        if entree in (0, 1):
+        if entree in (0, 1, 2, 3):
             last_z_in[zid] = entree
             mq.pub(f"zones/{zid}/entree", entree)
 
@@ -433,13 +453,18 @@ def main() -> None:
                     print(f"[{tick}] 🟡 Zone '{zname}' → {b}")
 
             entree = SPCClient.zone_input(z)
-            if entree in (0, 1):
+            if entree in (0, 1, 2, 3):
                 old_in = last_z_in.get(zid)
                 if old_in is None or entree != old_in:
                     mq.pub(f"zones/{zid}/entree", entree)
                     last_z_in[zid] = entree
                     if log_changes:
-                        state_txt = "fermée" if entree == 1 else "ouverte"
+                        state_txt = {
+                            0: "fermée",
+                            1: "ouverte",
+                            2: "isolée",
+                            3: "inhibée",
+                        }.get(entree, str(entree))
                         print(f"[{tick}] 🟢 Entrée zone '{zname}' → {state_txt}")
 
         for a in data["areas"]:

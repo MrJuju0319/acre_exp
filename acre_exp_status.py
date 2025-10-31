@@ -107,7 +107,9 @@ class SPCClient:
         low = resp_text.lower()
         has_user = ('name="userid"' in low) or ('id="userid"' in low) or ("id='userid'" in low)
         has_pass = ('name="password"' in low) or ('id="password"' in low) or ("id='password'" in low)
-        return has_user and has_pass
+        if has_user and has_pass:
+            return True
+        return "utilisateur déconnecté" in low
 
     def _do_login(self):
         logging.debug("Performing login…")
@@ -134,31 +136,116 @@ class SPCClient:
 
     @staticmethod
     def _extract_state_text(td):
-        txt = td.get_text(strip=True)
-        if txt:
-            return txt
-        img = td.find("img")
-        if img:
-            alt = (img.get("alt") or "").strip()
-            if alt:
-                return alt
-            title = (img.get("title") or "").strip()
-            if title:
-                return title
+        if td is None:
+            return ""
+
+        # 1) tenter directement le texte brut (BeautifulSoup gère les balises
+        # <font> et autres en fournissant la concaténation des textes).
+        try:
+            text = td.get_text(" ", strip=True)
+            if text:
+                return text
+        except Exception:
+            pass
+
+        # 2) repli équivalent mais en éliminant les chaînes vides.
+        pieces = []
+        try:
+            pieces = [s.strip() for s in td.stripped_strings if s.strip()]
+        except Exception:
+            pieces = []
+        if pieces:
+            return " ".join(pieces)
+
+        # 3) certains états peuvent être représentés via une icône ou un
+        # attribut.
+        for tag_name in ("img", "span", "i", "font"):
+            node = td.find(tag_name)
+            if not node:
+                continue
+            txt = (node.get_text(" ", strip=True) or "").strip()
+            if txt:
+                return txt
+            for attr in ("alt", "title", "data-state"):
+                val = (node.get(attr) or "").strip()
+                if val:
+                    return val
+
+        # 4) à défaut, tenter les attributs directement sur la cellule.
+        for attr in ("data-state", "title", "aria-label"):
+            val = (td.get(attr) or "").strip()
+            if val:
+                return val
         return ""
 
     @staticmethod
+    def _color_hint(td):
+        if td is None:
+            return ""
+        node = td.find("font") or td.find("span") or td
+        color = (node.get("color") or "").lower()
+        if color:
+            return color
+        style = (node.get("style") or "").lower()
+        if "color" in style:
+            m = re.search(r"color\s*:\s*([^;]+)", style)
+            if m:
+                return m.group(1).strip()
+        return ""
+
+    @classmethod
+    def _infer_entree(cls, td, entree_txt: str, etat_txt: str):
+        code = cls._map_entree(entree_txt)
+        if code != -1:
+            return code, entree_txt
+
+        color = cls._color_hint(td)
+        if color:
+            if "green" in color or "#008000" in color:
+                return 0, entree_txt or "Fermée"
+            if "red" in color or "#ff0000" in color:
+                return 1, entree_txt or "Ouverte"
+            if any(c in color for c in ("orange", "#ffa500", "#ff9900")):
+                return 2, entree_txt or "Isolée"
+            if any(c in color for c in ("blue", "#0000ff")):
+                return 3, entree_txt or "Inhibée"
+
+        etat_code = cls._map_zone_state(etat_txt)
+        if etat_code == 2:
+            return 2, entree_txt or "Isolée"
+        if etat_code == 3:
+            return 3, entree_txt or "Inhibée"
+        if etat_code == 1:
+            return 1, entree_txt or "Ouverte"
+        if etat_code == 0:
+            return 0, entree_txt or "Fermée"
+        if etat_code == 4:
+            return 1, entree_txt or "Trouble"
+
+        return -1, entree_txt
+
+    @staticmethod
     def _map_entree(txt):
-        s = (txt or "").lower()
-        if "ferm" in s: return 1
-        if "ouvert" in s: return 0
+        s = (txt or "").strip().lower()
+        if not s:
+            return -1
+        if "isol" in s: return 2
+        if "inhib" in s: return 3
+        if "ferm" in s: return 0
+        if "ouvr" in s: return 1
         return -1
 
     @staticmethod
     def _map_zone_state(txt):
-        s = (txt or "").lower()
-        if "normal" in s: return 1
-        if "activ"  in s: return 2
+        s = (txt or "").strip().lower()
+        if not s:
+            return -1
+        if "isol" in s: return 2
+        if "inhib" in s: return 3
+        if "ouvr" in s: return 1
+        if "activ" in s or "alarm" in s or "alarme" in s: return 1
+        if "normal" in s or "repos" in s: return 0
+        if "trouble" in s or "defaut" in s or "défaut" in s: return 4
         return -1
 
     @staticmethod
@@ -191,13 +278,14 @@ class SPCClient:
                 sect  = tds[1].get_text(strip=True)
                 entree_txt = self._extract_state_text(tds[4])
                 etat_txt   = self._extract_state_text(tds[5])
+                entree_code, entree_txt = self._infer_entree(tds[4], entree_txt, etat_txt)
                 if zname:
                     zones.append({
                         "zone": zname,
                         "secteur": sect,
                         "entree_txt": entree_txt,
                         "etat_txt": etat_txt,
-                        "entree": self._map_entree(entree_txt),
+                        "entree": entree_code,
                         "etat":   self._map_zone_state(etat_txt),
                         "id":     self.zone_id_from_name(zname),
                     })
@@ -229,12 +317,13 @@ class SPCClient:
         if not sid:
             return {"error": "Impossible d’obtenir une session"}
 
-        def _fetch(page: str):
+        def _fetch(page: str, referer_page: str = "spc_home"):
             url = f"{self.host}/secure.htm?session={sid}&page={page}"
-            r = self._get(url, referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
+            referer = f"{self.host}/secure.htm?session={sid}&page={referer_page}"
+            r = self._get(url, referer=referer)
             return sid, r
 
-        sid, r_z = _fetch("status_zones")
+        sid, r_z = _fetch("status_zones", referer_page="status_zones")
         logging.debug("Requesting zones from: %s (len=%d)", r_z.url, len(r_z.text))
         zones = self.parse_zones(r_z.text)
         if len(zones) == 0 and self._is_login_response(r_z.text, getattr(r_z, "url", ""), True):
@@ -243,11 +332,11 @@ class SPCClient:
             if new_sid:
                 sid = new_sid
                 r_z = self._get(f"{self.host}/secure.htm?session={sid}&page=status_zones",
-                                 referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
+                                 referer=f"{self.host}/secure.htm?session={sid}&page=status_zones")
                 zones = self.parse_zones(r_z.text)
                 logging.debug("zones retry length: %d — parsed: %d", len(r_z.text), len(zones))
 
-        sid, r_a = _fetch("spc_home")
+        sid, r_a = _fetch("system_summary", referer_page="controller_status")
         logging.debug("Requesting areas from: %s (len=%d)", r_a.url, len(r_a.text))
         areas = self.parse_areas(r_a.text)
         if len(areas) == 0 and self._is_login_response(r_a.text, getattr(r_a, "url", ""), True):
@@ -255,8 +344,8 @@ class SPCClient:
             new_sid = self._do_login()
             if new_sid:
                 sid = new_sid
-                r_a = self._get(f"{self.host}/secure.htm?session={sid}&page=spc_home",
-                                 referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
+                r_a = self._get(f"{self.host}/secure.htm?session={sid}&page=system_summary",
+                                 referer=f"{self.host}/secure.htm?session={sid}&page=controller_status")
                 areas = self.parse_areas(r_a.text)
                 logging.debug("areas retry length: %d — parsed: %d", len(r_a.text), len(areas))
 
