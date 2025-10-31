@@ -8,7 +8,7 @@ from bs4 import BeautifulSoup
 from http.cookiejar import MozillaCookieJar
 from typing import Dict
 
-# === paho-mqtt v2.x, API V5 imposée ===
+# === paho-mqtt v2.x, API V5 ===
 try:
     from paho.mqtt import client as mqtt
     from paho.mqtt.client import CallbackAPIVersion
@@ -47,7 +47,6 @@ class SPCClient:
         self.cookiejar = MozillaCookieJar(self.cookie_file)
         self._load_cookies()
 
-    # --- cookies
     def _load_cookies(self):
         try:
             if os.path.exists(self.cookie_file):
@@ -65,7 +64,6 @@ class SPCClient:
         except Exception:
             pass
 
-    # --- http
     def _get(self, url, referer=None):
         headers = {}
         if referer:
@@ -84,7 +82,6 @@ class SPCClient:
         r.encoding = "utf-8"
         return r
 
-    # --- session cache
     def _load_session_cache(self):
         if not os.path.exists(self.session_file):
             return {}
@@ -119,33 +116,22 @@ class SPCClient:
             return False
         low = resp_text.lower()
         has_user = ('name="userid"' in low) or ('id="userid"' in low) or ("id='userid'" in low)
-        has_pass = ('name="password"' in low) or ('id="password"' in low) or ("id='password'" in low)
+        has_pass = ('name="password"' in low) or ('id="password'" in low) or ("id='password'" in low)
         return has_user and has_pass
 
-    def _do_login(self) -> str:
-        logging.debug("Performing login…")
-        try:
-            self._get(f"{self.host}/login.htm")
-        except Exception:
-            pass
-        url = f"{self.host}/login.htm?action=login&language={self.lang}"
-        r = self._post(url, {"userid": self.user, "password": self.pin}, allow_redirects=True)
-        sid = self._extract_session(r.url) or self._extract_session(r.text)
-        logging.debug("Login got SID=%s", sid or "(none)")
-        if sid:
-            self._save_session_cache(sid)
-            self._save_cookies()
-            return sid
+    @staticmethod
+    def _extract_state_text(td):
+        txt = td.get_text(strip=True)
+        if txt:
+            return txt
+        img = td.find("img")
+        if img:
+            alt = (img.get("alt") or "").strip()
+            if alt: return alt
+            title = (img.get("title") or "").strip()
+            if title: return title
         return ""
 
-    def get_or_login(self) -> str:
-        d = self._load_session_cache()
-        sid = d.get("session", "")
-        if sid:
-            return sid
-        return self._do_login()
-
-    # --- parsing helpers
     @staticmethod
     def zone_bin(etat_txt: str) -> int:
         s = (etat_txt or "").lower()
@@ -168,21 +154,6 @@ class SPCClient:
         import re as _re
         slug = _re.sub(r"[^a-zA-Z0-9]+", "_", name or "").strip("_").lower()
         return slug or "unknown"
-
-    @staticmethod
-    def _extract_state_text(td):
-        txt = td.get_text(strip=True)
-        if txt:
-            return txt
-        img = td.find("img")
-        if img:
-            alt = (img.get("alt") or "").strip()
-            if alt:
-                return alt
-            title = (img.get("title") or "").strip()
-            if title:
-                return title
-        return ""
 
     def parse_zones(self, html):
         soup = BeautifulSoup(html, "html.parser")
@@ -214,10 +185,18 @@ class SPCClient:
                     areas.append({"sid": num, "nom": nom, "etat_txt": state})
         return areas
 
+    def __init_logging(self, debug: bool):
+        logging.basicConfig(stream=sys.stderr, level=(logging.DEBUG if debug else logging.INFO),
+                            format="%(levelname)s:%(message)s")
+
+    def fetch(self):
+        # placeholder; logging configuration is done in main()
+        pass
+
+    # Split fetch out of __init__ to keep code above tidy
     def fetch(self):
         sid = self.get_or_login()
-        if not sid:
-            return {"zones": [], "areas": []}
+        if not sid: return {"zones": [], "areas": []}
 
         def _fetch(page: str):
             url = f"{self.host}/secure.htm?session={sid}&page={page}"
@@ -226,7 +205,6 @@ class SPCClient:
             logging.debug("%s page length: %d bytes", page, len(r.text))
             return sid, r
 
-        # ZONES
         sid, r_z = _fetch("status_zones")
         zones = self.parse_zones(r_z.text)
         logging.debug("Parsed zones count: %d", len(zones))
@@ -235,12 +213,11 @@ class SPCClient:
             new_sid = self._do_login()
             if new_sid:
                 sid = new_sid
-                url = f"{self.host}/secure.htm?session={sid}&page=status_zones"
-                r_z = self._get(url, referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
+                r_z = self._get(f"{self.host}/secure.htm?session={sid}&page=status_zones",
+                                 referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
                 zones = self.parse_zones(r_z.text)
                 logging.debug("status_zones retry length: %d — parsed: %d", len(r_z.text), len(zones))
 
-        # AREAS
         sid, r_a = _fetch("spc_home")
         areas = self.parse_areas(r_a.text)
         logging.debug("Parsed areas count: %d", len(areas))
@@ -249,8 +226,8 @@ class SPCClient:
             new_sid = self._do_login()
             if new_sid:
                 sid = new_sid
-                url = f"{self.host}/secure.htm?session={sid}&page=spc_home"
-                r_a = self._get(url, referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
+                r_a = self._get(f"{self.host}/secure.htm?session={sid}&page=spc_home",
+                                 referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
                 areas = self.parse_areas(r_a.text)
                 logging.debug("spc_home retry length: %d — parsed: %d", len(r_a.text), len(areas))
 
@@ -270,11 +247,9 @@ class MQ:
         self.qos  = int(m.get("qos", 0))
         self.retain = bool(m.get("retain", True))
         self.client_id = m.get("client_id", "spc42-watchdog")
-        # Optionnel : protocole MQTT (v311 par défaut pour compatibilité large)
         proto = str(m.get("protocol", "v311")).lower()
         self.protocol = mqtt.MQTTv5 if proto in ("v5", "mqttv5", "5") else mqtt.MQTTv311
 
-        # paho v2.x + API V5 => signatures modernes
         self.client = mqtt.Client(
             client_id=self.client_id,
             protocol=self.protocol,
@@ -358,8 +333,8 @@ def main() -> None:
     # Snapshot initial
     snap = spc.fetch()
     for z in snap["zones"]:
-        zid = spc.zone_id_from_name(z["zname"])
-        b   = spc.zone_bin(z["etat_txt"])
+        zid = SPCClient.zone_id_from_name(z["zname"])
+        b   = SPCClient.zone_bin(z["etat_txt"])
         mq.pub(f"zones/{zid}/name", z["zname"])
         mq.pub(f"zones/{zid}/secteur", z["sect"])
         if b in (0,1):
@@ -368,7 +343,7 @@ def main() -> None:
 
     for a in snap["areas"]:
         sid = a["sid"]
-        s   = spc.area_num(a["etat_txt"])
+        s   = SPCClient.area_num(a["etat_txt"])
         mq.pub(f"secteurs/{sid}/name", a["nom"])
         if s >= 0:
             last_a[sid] = s
@@ -385,10 +360,9 @@ def main() -> None:
             time.sleep(interval)
             continue
 
-        # zones
         for z in data["zones"]:
-            zid = spc.zone_id_from_name(z["zname"])
-            b   = spc.zone_bin(z["etat_txt"])
+            zid = SPCClient.zone_id_from_name(z["zname"])
+            b   = SPCClient.zone_bin(z["etat_txt"])
             if b not in (0,1): continue
             old = last_z.get(zid)
             if old is None or b != old:
@@ -397,10 +371,9 @@ def main() -> None:
                 if log_changes:
                     print(f"[{tick}] 🟡 Zone '{z['zname']}' → {b}")
 
-        # secteurs
         for a in data["areas"]:
             sid = a["sid"]
-            s   = spc.area_num(a["etat_txt"])
+            s   = SPCClient.area_num(a["etat_txt"])
             if s < 0: continue
             old = last_a.get(sid)
             if old is None or s != old:
