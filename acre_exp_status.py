@@ -199,6 +199,77 @@ class SPCClient:
         if "alarme" in s: return 4
         return 0
 
+    def _secure_url(self, sid: str, page: str) -> str:
+        return f"{self.host}/secure.htm?session={sid}&page={page}"
+
+    @staticmethod
+    def _collect_form_values(form):
+        data = {}
+        for inp in form.find_all("input"):
+            name = inp.get("name")
+            if not name:
+                continue
+            itype = (inp.get("type") or "").lower()
+            if itype in ("submit", "button", "image"):
+                continue
+            if itype == "checkbox":
+                if inp.has_attr("checked"):
+                    data[name] = inp.get("value", "on")
+                continue
+            data[name] = inp.get("value", "")
+
+        for sel in form.find_all("select"):
+            name = sel.get("name")
+            if not name:
+                continue
+            option = sel.find("option", selected=True) or sel.find("option")
+            if option:
+                data[name] = option.get("value", option.get_text(strip=True))
+        return data
+
+    def _refresh_from_form(self, sid: str, page: str, response, base_url: str):
+        try:
+            soup = BeautifulSoup(response.text, "html.parser")
+        except Exception:
+            return None
+
+        form = soup.find("form")
+        if not form:
+            return None
+
+        action = form.get("action") or base_url
+        target = urljoin(base_url, action)
+        if "session=" not in target:
+            sep = "&" if "?" in target else "?"
+            target = f"{target}{sep}session={sid}"
+
+        data = self._collect_form_values(form)
+
+        try:
+            return self._post(target, data, referer=base_url)
+        except Exception:
+            return None
+
+    def _load_page_with_refresh(self, sid: str, page: str, referer_page: str = None):
+        base_url = self._secure_url(sid, page)
+        referer_url = self._secure_url(sid, referer_page or page)
+        response = self._get(base_url, referer=referer_url)
+
+        new_sid = self._extract_session(getattr(response, "url", "")) or sid
+        if new_sid and new_sid != sid:
+            sid = new_sid
+            base_url = self._secure_url(sid, page)
+
+        refreshed = self._refresh_from_form(sid, page, response, base_url)
+        if refreshed is not None:
+            response = refreshed
+            new_sid = (self._extract_session(getattr(response, "url", "")) or
+                       self._extract_session(getattr(response, "text", "")) or sid)
+            if new_sid and new_sid != sid:
+                sid = new_sid
+
+        return sid, response
+
     def parse_zones(self, html):
         soup = BeautifulSoup(html, "html.parser")
         grid = soup.find("table", {"class": "gridtable"})
@@ -250,36 +321,34 @@ class SPCClient:
         if not sid:
             return {"error": "Impossible d’obtenir une session"}
 
-        def _fetch(page: str):
-            url = f"{self.host}/secure.htm?session={sid}&page={page}"
-            r = self._get(url, referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
-            return sid, r
+        attempts = 0
+        zones = []
+        areas = []
+        while attempts < 2:
+            sid, r_z = self._load_page_with_refresh(sid, "status_zones", referer_page="spc_home")
+            logging.debug("Requesting zones from: %s (len=%d)", getattr(r_z, "url", "?"), len(getattr(r_z, "text", "")))
+            if self._is_login_response(getattr(r_z, "text", ""), getattr(r_z, "url", ""), True):
+                logging.debug("Zones page returned login — retrying after re-login")
+                new_sid = self._do_login()
+                if new_sid:
+                    sid = new_sid
+                    attempts += 1
+                    continue
+                break
+            zones = self.parse_zones(r_z.text)
 
-        sid, r_z = _fetch("status_zones")
-        logging.debug("Requesting zones from: %s (len=%d)", r_z.url, len(r_z.text))
-        zones = self.parse_zones(r_z.text)
-        if len(zones) == 0 and self._is_login_response(r_z.text, getattr(r_z, "url", ""), True):
-            logging.debug("Zones parse empty + looks like login — re-login once")
-            new_sid = self._do_login()
-            if new_sid:
-                sid = new_sid
-                r_z = self._get(f"{self.host}/secure.htm?session={sid}&page=status_zones",
-                                 referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
-                zones = self.parse_zones(r_z.text)
-                logging.debug("zones retry length: %d — parsed: %d", len(r_z.text), len(zones))
-
-        sid, r_a = _fetch("spc_home")
-        logging.debug("Requesting areas from: %s (len=%d)", r_a.url, len(r_a.text))
-        areas = self.parse_areas(r_a.text)
-        if len(areas) == 0 and self._is_login_response(r_a.text, getattr(r_a, "url", ""), True):
-            logging.debug("Areas parse empty + looks like login — re-login once")
-            new_sid = self._do_login()
-            if new_sid:
-                sid = new_sid
-                r_a = self._get(f"{self.host}/secure.htm?session={sid}&page=spc_home",
-                                 referer=f"{self.host}/secure.htm?session={sid}&page=spc_home")
-                areas = self.parse_areas(r_a.text)
-                logging.debug("areas retry length: %d — parsed: %d", len(r_a.text), len(areas))
+            sid, r_a = self._load_page_with_refresh(sid, "system_summary", referer_page="spc_home")
+            logging.debug("Requesting areas from: %s (len=%d)", getattr(r_a, "url", "?"), len(getattr(r_a, "text", "")))
+            if self._is_login_response(getattr(r_a, "text", ""), getattr(r_a, "url", ""), True):
+                logging.debug("Areas page returned login — retrying after re-login")
+                new_sid = self._do_login()
+                if new_sid:
+                    sid = new_sid
+                    attempts += 1
+                    continue
+                break
+            areas = self.parse_areas(r_a.text)
+            break
 
         self._save_cookies()
         self._save_session_cache(sid)
