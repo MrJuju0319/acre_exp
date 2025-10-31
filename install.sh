@@ -7,7 +7,6 @@ set -euo pipefail
 
 C_RESET="\033[0m"; C_GREEN="\033[1;32m"; C_YELLOW="\033[1;33m"; C_BLUE="\033[1;34m"; C_RED="\033[1;31m"
 
-# --- chemins / noms ---
 REPO_URL="${REPO_URL:-https://github.com/MrJuju0319/acre_exp.git}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 SRC_DIR="/usr/local/src/acre_exp"
@@ -28,7 +27,7 @@ Usage:
   $0 --install [--yes]
   $0 --update
 
-Variables optionnelles (peuvent être exportées avant exécution) :
+Variables optionnelles (exportables avant exécution) :
   REPO_URL, REPO_BRANCH
   SPC_HOST, SPC_USER, SPC_PIN, SPC_LANG, MIN_LOGIN_INTERVAL
   MQTT_HOST, MQTT_PORT, MQTT_USER, MQTT_PASS, MQTT_BASE_TOPIC, MQTT_CLIENT_ID, MQTT_QOS, MQTT_RETAIN
@@ -42,6 +41,18 @@ if [[ $EUID -ne 0 ]]; then echo -e "${C_RED}[ERREUR]${C_RESET} Exécute en root.
 ask() { local prompt="$1"; local def="$2"; local var; if [[ "$ASSUME_YES" == "true" ]]; then echo -e "${C_BLUE}${prompt}${C_RESET} (${def})"; echo "$def"; return 0; fi; read -rp "$(echo -e ${C_BLUE}${prompt}${C_RESET}" [${def}] : ")" var || true; echo "${var:-$def}"; }
 confirm() { local p="$1"; if [[ "$ASSUME_YES" == "true" ]]; then return 0; fi; read -rp "$(echo -e ${C_BLUE}${p}${C_RESET} [o/N] : )" yn || true; [[ "${yn,,}" == o || "${yn,,}" == oui || "${yn,,}" == y || "${yn,,}" == yes ]]; }
 line() { echo -e "${C_YELLOW}------------------------------------------------------------${C_RESET}"; }
+
+normalize_repo_files() {
+  # 1) Convertir CRLF -> LF
+  find "$SRC_DIR" -type f \( -name "*.sh" -o -name "*.py" -o -name "*.service" \) -exec sed -i 's/\r$//' {} +
+
+  # 2) Retirer un éventuel BOM UTF-8 sur les fichiers exécutables + service
+  for f in install.sh acre_exp_status.py acre_exp_watchdog.py acre-exp-watchdog.service; do
+    local p="$SRC_DIR/$f"
+    [[ -f "$p" ]] || continue
+    awk 'NR==1{sub(/^\xef\xbb\xbf/,"")}{print}' "$p" > "$p.tmp" && mv "$p.tmp" "$p"
+  done
+}
 
 echo -e "${C_GREEN}>>> Vérification des paquets système...${C_RESET}"
 PKGS=(git python3 python3-venv python3-pip jq)
@@ -65,6 +76,9 @@ else
   git -C "$SRC_DIR" reset --hard "origin/${REPO_BRANCH}"
 fi
 
+# --- Normalisation CRLF/BOM — auto-heal ---
+normalize_repo_files
+
 # --- venv ---
 echo -e "${C_GREEN}>>> Préparation du venv Python:${C_RESET} ${VENV_DIR}"
 if [[ ! -d "$VENV_DIR" ]]; then python3 -m venv "$VENV_DIR"; fi
@@ -75,7 +89,6 @@ echo -e "${C_GREEN}>>> Installation deps Python (requests, bs4, pyyaml, paho-mqt
 
 # --- Sanity check paho v2 + API V5 ---
 "${VENV_DIR}/bin/python" - <<'PY'
-import sys
 import paho.mqtt.client as m
 from paho.mqtt.client import CallbackAPIVersion as C
 assert hasattr(C, "V5"), "CallbackAPIVersion.V5 indisponible (paho-mqtt v2 attendu)"
@@ -158,12 +171,12 @@ YAML
   fi
 fi
 
-# --- Installation des scripts (copie + shebangs venv) ---
+# --- Installation des scripts (copie) ---
 echo -e "${C_GREEN}>>> Installation des scripts${C_RESET}"
 install -m 0755 "$SRC_DIR/acre_exp_status.py"   "$BIN_STATUS"
 install -m 0755 "$SRC_DIR/acre_exp_watchdog.py" "$BIN_WATCHDOG"
 
-# Réécrit le 1er shebang pour pointer vers le Python du venv, sans options
+# --- Shebangs vers le venv (sans options) ---
 sed -i "1s|^#!.*python.*$|#!${VENV_DIR}/bin/python3|" "$BIN_STATUS"
 sed -i "1s|^#!.*python.*$|#!${VENV_DIR}/bin/python3|" "$BIN_WATCHDOG"
 
