@@ -1,13 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# =============================
-# ACRE SPC42 → MQTT installer (Git-based)
-# =============================
-
 C_RESET="\033[0m"; C_GREEN="\033[1;32m"; C_YELLOW="\033[1;33m"; C_BLUE="\033[1;34m"; C_RED="\033[1;31m"
 
-# --- chemins / noms ---
 REPO_URL="${REPO_URL:-https://github.com/MrJuju0319/acre_exp.git}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 SRC_DIR="/usr/local/src/acre_exp"
@@ -28,7 +23,7 @@ Usage:
   $0 --install [--yes]
   $0 --update
 
-Env vars utiles:
+Env vars:
   REPO_URL, REPO_BRANCH
   SPC_HOST, SPC_USER, SPC_PIN, SPC_LANG, MIN_LOGIN_INTERVAL
   MQTT_HOST, MQTT_PORT, MQTT_USER, MQTT_PASS, MQTT_BASE_TOPIC, MQTT_CLIENT_ID, MQTT_QOS, MQTT_RETAIN
@@ -39,35 +34,15 @@ EOF
 if [[ "${MODE}" == "--help" || -z "${MODE}" ]]; then usage; exit 0; fi
 if [[ $EUID -ne 0 ]]; then echo -e "${C_RED}[ERREUR]${C_RESET} Exécute en root."; exit 1; fi
 
-ask() {
-  local prompt="$1"; local default="$2"; local var
-  if [[ "$ASSUME_YES" == "true" ]]; then
-    echo -e "${C_BLUE}${prompt}${C_RESET} (${default})"
-    echo "$default"
-    return 0
-  fi
-  read -rp "$(echo -e ${C_BLUE}${prompt}${C_RESET}" [${default}] : ")" var || true
-  echo "${var:-$default}"
-}
-
-confirm() {
-  local prompt="$1"
-  if [[ "$ASSUME_YES" == "true" ]]; then return 0; fi
-  read -rp "$(echo -e ${C_BLUE}${prompt}${C_RESET} [o/N] : )" yn || true
-  [[ "${yn,,}" == "o" || "${yn,,}" == "oui" || "${yn,,}" == "y" || "${yn,,}" == "yes" ]]
-}
-
+ask() { local prompt="$1"; local def="$2"; local var; if [[ "$ASSUME_YES" == "true" ]]; then echo -e "${C_BLUE}${prompt}${C_RESET} (${def})"; echo "$def"; return 0; fi; read -rp "$(echo -e ${C_BLUE}${prompt}${C_RESET}" [${def}] : ")" var || true; echo "${var:-$def}"; }
+confirm() { local p="$1"; if [[ "$ASSUME_YES" == "true" ]]; then return 0; fi; read -rp "$(echo -e ${C_BLUE}${p}${C_RESET} [o/N] : )" yn || true; [[ "${yn,,}" == o || "${yn,,}" == oui || "${yn,,}" == y || "${yn,,}" == yes ]]; }
 line() { echo -e "${C_YELLOW}------------------------------------------------------------${C_RESET}"; }
 
 echo -e "${C_GREEN}>>> Vérification des paquets système...${C_RESET}"
 PKGS=(git python3 python3-venv python3-pip jq)
 if command -v apt-get >/dev/null 2>&1; then
-  MISSING=()
-  for p in "${PKGS[@]}"; do dpkg -s "$p" >/dev/null 2>&1 || MISSING+=("$p"); done
-  if (( ${#MISSING[@]} )); then
-    apt-get update -y
-    apt-get install -y "${MISSING[@]}"
-  fi
+  MISSING=(); for p in "${PKGS[@]}"; do dpkg -s "$p" >/dev/null 2>&1 || MISSING+=("$p"); done
+  if (( ${#MISSING[@]} )); then apt-get update -y; apt-get install -y "${MISSING[@]}"; fi
 else
   echo -e "${C_YELLOW}[ATTENTION] Pas d'APT détecté. Assure-toi d'avoir:${C_RESET} ${PKGS[*]}"
 fi
@@ -82,17 +57,27 @@ if [[ ! -d "$SRC_DIR/.git" ]]; then
 else
   echo -e "${C_GREEN}>>> Mise à jour du dépôt${C_RESET} $SRC_DIR"
   git -C "$SRC_DIR" fetch --depth 1 origin "$REPO_BRANCH"
-  git -C "$SRC_DIR" reset --hard "origin/${REPO_BRANCH}"
+  git -C "$SRC_DIR" reset --hard "origin/${REPO_BRANCH}"`
 fi
 
 # --- venv ---
 echo -e "${C_GREEN}>>> Préparation du venv Python: ${VENV_DIR}${C_RESET}"
 if [[ ! -d "$VENV_DIR" ]]; then python3 -m venv "$VENV_DIR"; fi
 "${VENV_DIR}/bin/python" -m pip install --upgrade pip >/dev/null
-echo -e "${C_GREEN}>>> Installation deps Python (requests, bs4, pyyaml, paho-mqtt)${C_RESET}"
-"${VENV_DIR}/bin/pip" install --quiet requests beautifulsoup4 pyyaml paho-mqtt
 
-# --- Config (uniquement en --install, sauf si déjà présente) ---
+echo -e "${C_GREEN}>>> Installation deps Python (requests, bs4, pyyaml, paho-mqtt v2.x)${C_RESET}"
+"${VENV_DIR}/bin/pip" install --quiet requests beautifulsoup4 pyyaml "paho-mqtt>=2,<3"
+
+# --- Sanity check paho v2 + API V5 ---
+"${VENV_DIR}/bin/python" - <<'PY'
+import sys
+import paho.mqtt.client as m
+from paho.mqtt.client import CallbackAPIVersion as C
+assert hasattr(C, "V5"), "CallbackAPIVersion.V5 indisponible (paho-mqtt v2 attendu)"
+print("paho-mqtt OK:", m.__version__)
+PY
+
+# --- Config (en --install) ---
 if [[ "${MODE}" == "--install" ]]; then
   write_cfg=true
   if [[ -f "$CFG_FILE" ]]; then
@@ -137,7 +122,6 @@ if [[ "${MODE}" == "--install" ]]; then
     WD_REFRESH="$(ask "Intervalle de refresh watchdog (sec)" "$WD_REFRESH_DEFAULT")"
     WD_LOG_CHANGES="$(ask "Logs des changements (true/false)" "$WD_LOG_DEFAULT")"
 
-    echo -e "${C_GREEN}>>> Écriture: ${CFG_FILE}${C_RESET}"
     cat > "$CFG_FILE" <<YAML
 spc:
   host: "${SPC_HOST}"
@@ -156,6 +140,7 @@ mqtt:
   client_id: "${MQTT_CLIENT_ID}"
   qos: ${MQTT_QOS}
   retain: ${MQTT_RETAIN}
+  # protocol: v311 | v5  (défaut v311)
 
 watchdog:
   refresh_interval: ${WD_REFRESH}
@@ -167,15 +152,10 @@ YAML
   fi
 fi
 
-# --- Installation des binaires depuis le dépôt (copie "corrigée") ---
 echo -e "${C_GREEN}>>> Installation des scripts${C_RESET}"
-install -m 0755 "$SRC_DIR/acre_exp_status.py"    "$BIN_STATUS"
-install -m 0755 "$SRC_DIR/acre_exp_watchdog.py"  "$BIN_WATCHDOG"
+install -m 0755 "$SRC_DIR/acre_exp_status.py"   "$BIN_STATUS"
+install -m 0755 "$SRC_DIR/acre_exp_watchdog.py" "$BIN_WATCHDOG"
 
-# Si ton dépôt contient déjà ces versions corrigées, garde la copie telle quelle.
-# Sinon, tu peux remplacer par les fichiers fournis dans ce message.
-
-# --- Service systemd ---
 echo -e "${C_GREEN}>>> Installation du service systemd${C_RESET}"
 cat > "$SERVICE_FILE" <<'SYSTEMD'
 [Unit]
@@ -210,7 +190,6 @@ WantedBy=multi-user.target
 SYSTEMD
 
 systemctl daemon-reload
-
 if [[ "${MODE}" == "--install" ]]; then
   systemctl enable --now acre-exp-watchdog.service
 elif [[ "${MODE}" == "--update" ]]; then
