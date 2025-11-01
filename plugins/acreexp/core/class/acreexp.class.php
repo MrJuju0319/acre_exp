@@ -141,8 +141,7 @@ class acreexp extends eqLogic {
      */
     public function postSave() {
         try {
-            $snapshot = $this->fetchControllerSnapshot();
-            $this->applySnapshot($snapshot, true);
+            $this->synchronize(true);
         } catch (Exception $e) {
             log::add('acreexp', 'error', sprintf(__('Synchronisation impossible : %s', __FILE__), $e->getMessage()));
         }
@@ -152,8 +151,17 @@ class acreexp extends eqLogic {
      * Interroge la centrale et met à jour les commandes existantes.
      */
     public function refreshFromController() {
+        $this->synchronize(false);
+    }
+
+    /**
+     * Synchronise l'équipement avec la centrale.
+     *
+     * @param bool $createMissing Crée les commandes manquantes si vrai.
+     */
+    public function synchronize($createMissing = false) {
         $snapshot = $this->fetchControllerSnapshot();
-        $this->applySnapshot($snapshot, false);
+        $this->applySnapshot($snapshot, (bool)$createMissing);
     }
 
     /**

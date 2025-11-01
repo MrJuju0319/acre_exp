@@ -1,14 +1,31 @@
 {
   "id": "acreexp",
   "name": "ACRE SPC",
-  "logicalId": "acreexp",
-  "category": "security",
+  "pluginVersion": "1.0.1",
+  "description": {
+    "fr_FR": "Pilote une centrale ACRE/Siemens SPC et synchronise automatiquement les secteurs et zones."
+  },
+  "licence": "AGPL",
   "author": "Jeedom Community",
-  "license": "AGPL",
-  "description": "Pilote une centrale ACRE/Siemens SPC et synchronise automatiquement les secteurs et zones.",
   "require": "4.4",
+  "category": "security",
   "hasDependency": false,
   "hasOwnDeamon": true,
-  "changelog": "docs/changelog.md",
-  "documentation": "docs"
+  "maxDependancyInstallTime": 0,
+  "documentation": "plugins/acreexp/docs/fr_FR/index.md",
+  "documentation_beta": "plugins/acreexp/docs/fr_FR/index.md",
+  "changelog": "plugins/acreexp/docs/fr_FR/changelog.md",
+  "changelog_beta": "plugins/acreexp/docs/fr_FR/changelog_beta.md",
+  "language": [
+    "fr_FR"
+  ],
+  "compatibility": [
+    "smart",
+    "luna",
+    "atlas",
+    "rpi",
+    "docker",
+    "diy",
+    "mobile"
+  ]
 }
