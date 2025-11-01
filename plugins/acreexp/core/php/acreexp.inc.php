@@ -1,36 +1,26 @@
 <?php
 /*
- * Gestion de l'installation et de la mise à jour du plugin ACRE SPC.
+ * Fonctions utilitaires partagées par le plugin ACRE SPC.
  */
 
 require_once __DIR__ . '/../../../../core/php/core.inc.php';
 
-/**
- * Enregistre les clés de configuration globales attendues par le front si elles sont absentes.
- */
-function acreexp_apply_default_configuration() {
-    $defaults = [
-        'host' => '',
-        'port' => '',
-        'https' => 0,
-        'user' => '',
-        'code' => '',
-        'poll_interval' => 60,
-    ];
+if (!function_exists('acreexp_apply_default_configuration')) {
+    /**
+     * Enregistre les clés de configuration globale attendues par le plugin si elles sont absentes.
+     */
+    function acreexp_apply_default_configuration() {
+        $defaults = [
+            'poll_interval' => 60,
+            'python_binary' => '',
+        ];
 
-    foreach ($defaults as $key => $value) {
-        $sentinel = '__acreexp_missing__';
-        $current = config::byKey($key, 'acreexp', $sentinel);
-        if ($current === $sentinel) {
-            config::save($key, $value, 'acreexp');
+        foreach ($defaults as $key => $value) {
+            $sentinel = '__acreexp_missing__';
+            $current = config::byKey($key, 'acreexp', $sentinel);
+            if ($current === $sentinel) {
+                config::save($key, $value, 'acreexp');
+            }
         }
     }
-}
-
-function acreexp_install() {
-    acreexp_apply_default_configuration();
-}
-
-function acreexp_update() {
-    acreexp_apply_default_configuration();
 }
