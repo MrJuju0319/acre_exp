@@ -23,7 +23,7 @@ include_file('core', 'plugin.template', 'php');
     <div class="eqLogicThumbnailContainer">
       <?php foreach ($eqLogics as $eqLogic) { ?>
         <div class="eqLogicDisplayCard cursor" data-eqLogic_id="<?php echo $eqLogic->getId(); ?>">
-          <img src="plugins/acreexp/plugin_info/acreexp_icon.png" />
+          <i class="fas fa-shield-alt"></i>
           <br>
           <span><?php echo $eqLogic->getHumanName(true, true); ?></span>
         </div>
