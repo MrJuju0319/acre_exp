@@ -169,15 +169,21 @@ class SPCClient(StatusSPCClient):
             etat_txt = area
 
         s = cls._normalize_state_text(etat_txt)
-        if "mes totale" in s:
-            return 2
-        if "mes partiel" in s:
+        if not s:
+            return -1
+        if "partiel b" in s or "partielle b" in s or "partial b" in s or "part b" in s:
             return 3
+        if "partiel a" in s or "partielle a" in s or "partial a" in s or "part a" in s:
+            return 2
+        if "mes partiel" in s or "mes partielle" in s or "partiel" in s or "partielle" in s or "partial" in s:
+            return 2
+        if "mes totale" in s or "total" in s or "totale" in s or "tot" in s:
+            return 1
         if "alarme" in s:
             return 4
-        if "mhs" in s or "désarm" in s:
-            return 1
-        return 0
+        if "mhs" in s or "désarm" in s or "desarm" in s or "desactiv" in s or "desactive" in s:
+            return 0
+        return -1
 
     @staticmethod
     def zone_id_from_name(zone) -> str:
@@ -472,12 +478,21 @@ def main() -> None:
             if not sid:
                 continue
             s = SPCClient.area_num(a)
+            if s < 0:
+                continue
             old = last_a.get(sid)
             if old is None or s != old:
                 mq.pub(f"secteurs/{sid}/state", s)
                 last_a[sid] = s
                 if log_changes:
-                    print(f"[{tick}] 🔵 Secteur '{a.get('nom', sid)}' → {s}")
+                    state_txt = {
+                        0: "MHS",
+                        1: "MES",
+                        2: "MES partiel A",
+                        3: "MES partiel B",
+                        4: "Alarme",
+                    }.get(s, str(s))
+                    print(f"[{tick}] 🔵 Secteur '{a.get('nom', sid)}' → {state_txt}")
 
         time.sleep(interval)
 

@@ -57,7 +57,7 @@ mosquitto_sub -h 127.0.0.1 -t 'acre_XXX/#' -v
 
 * `acre_XXX/zones/<id>/state` — 0 = zone normale, 1 = zone activée.
 * `acre_XXX/zones/<id>/entree` — 1 = entrée fermée, 0 = entrée ouverte/alarme.
-* `acre_XXX/secteurs/<id>/state` — 0 = inconnu, 1 = désarmé, 2 = MES totale, 3 = MES partielle, 4 = alarme.
+* `acre_XXX/secteurs/<id>/state` — 0 = MHS (désarmé), 1 = MES (totale), 2 = MES partielle A, 3 = MES partielle B, 4 = alarme.
 
 ## 🧹 Désinstallation
 

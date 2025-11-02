@@ -187,10 +187,14 @@ class SPCClient:
         norm = SPCClient._normalize_label(token)
         if not norm:
             return ""
-        if any(k in norm for k in ("mes totale", "total", "totale", "tot")):
-            return "MES Totale"
+        if any(k in norm for k in ("mes partiel b", "mes partielle b", "partiel b", "partielle b", "partial b", "part b")):
+            return "MES Partielle B"
+        if any(k in norm for k in ("mes partiel a", "mes partielle a", "partiel a", "partielle a", "partial a", "part a")):
+            return "MES Partielle A"
         if any(k in norm for k in ("mes part", "partiel", "partial", "part")):
             return "MES Partielle"
+        if any(k in norm for k in ("mes totale", "total", "totale", "tot")):
+            return "MES Totale"
         if any(k in norm for k in ("mhs", "desarm", "desactive", "off", "ready")):
             return "MHS"
         if any(k in norm for k in ("alarm", "alarme", "alert")):
@@ -350,15 +354,21 @@ class SPCClient:
     @staticmethod
     def _map_area_state(txt):
         s = (txt or "").lower()
-        if "mes totale" in s or "total" in s or "totale" in s: return 2
-        if "mes partiel" in s or "partiel" in s or "partial" in s: return 3
-        if "mhs" in s or "désarm" in s or "desarm" in s or "off" in s or "ready" in s:
+        if "partiel b" in s or "partielle b" in s or "partial b" in s or "part b" in s:
+            return 3
+        if "partiel a" in s or "partielle a" in s or "partial a" in s or "part a" in s:
+            return 2
+        if "mes partiel" in s or "mes partielle" in s or "partiel" in s or "partielle" in s or "partial" in s:
+            return 2
+        if "mes totale" in s or "total" in s or "totale" in s or "tot" in s:
             return 1
+        if "mhs" in s or "désarm" in s or "desarm" in s or "off" in s or "ready" in s:
+            return 0
         if "alarme" in s or "alarm" in s or "alert" in s:
             return 4
         if "trouble" in s or "defaut" in s or "défaut" in s or "fault" in s:
             return 4
-        return 0
+        return -1
 
     def parse_zones(self, html):
         soup = BeautifulSoup(html, "html.parser")
