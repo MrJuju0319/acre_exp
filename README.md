@@ -14,10 +14,10 @@ chmod +x install.sh
 
 ```yaml
 spc:
-  host: "http://192.168.1.100"
+  host: "https://192.168.1.100"
   user: "Engineer"
   pin: "1111"
-  language: 253
+  language: 253  # 253 = Français, 0 = Anglais
   session_cache_dir: "/var/lib/acre_exp"
   min_login_interval_sec: 60
 
@@ -35,6 +35,8 @@ watchdog:
   refresh_interval: 2
   log_changes: true
   ```
+
+> ℹ️ **Astuce :** l'adresse `spc.host` peut indifféremment utiliser `http://` ou `https://` selon la configuration de votre centrale.
 
 ## 🔄 Mise à jour
 
