@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os, re, sys, time, json, argparse, signal, logging, warnings
+import queue
 import yaml
 import requests
 from bs4 import BeautifulSoup
@@ -346,6 +347,120 @@ class SPCClient(StatusSPCClient):
 
         return {"zones": zones, "areas": areas, "doors": doors}
 
+    @staticmethod
+    def _normalize_command(cmd: str) -> str:
+        return StatusSPCClient._normalize_label(cmd)
+
+    def _resolve_area_suffix(self, area_id: str):
+        if area_id is None:
+            raise ValueError("identifiant de secteur manquant")
+
+        raw = str(area_id).strip()
+        if not raw:
+            raise ValueError("identifiant de secteur vide")
+
+        norm = self._normalize_command(raw)
+        if raw == "0" or norm in ("0", "all", "tous", "all_secteurs", "tous_secteurs", "toussecteurs", "allareas"):
+            return "0", "all_areas", "Tous Secteurs"
+
+        if norm.startswith("area") and norm[4:].isdigit():
+            raw = norm[4:]
+
+        if raw.isdigit():
+            num = str(int(raw))
+            return num, f"area{num}", ""
+
+        # Essayer de retrouver par nom de secteur connu
+        try:
+            data = self.fetch()
+        except Exception:
+            data = {"areas": []}
+        for area in data.get("areas", []):
+            sid = str(area.get("sid") or "").strip()
+            label = str(area.get("nom") or area.get("secteur") or "").strip()
+            if sid:
+                if sid == raw:
+                    return sid, f"area{sid}", label
+                if sid.isdigit() and self._normalize_command(sid) == norm:
+                    num = str(int(sid))
+                    return num, f"area{num}", label
+            if label and self._normalize_command(label) == norm:
+                sid = str(area.get("sid") or self.area_id(area) or "").strip()
+                if sid:
+                    num = sid if not sid.isdigit() else str(int(sid))
+                    return num, ("all_areas" if num == "0" else f"area{num}"), label
+
+        raise ValueError(f"secteur '{raw}' introuvable")
+
+    def _command_to_button(self, area_suffix: str, command: str):
+        norm = self._normalize_command(command)
+        if not norm:
+            raise ValueError("commande vide")
+
+        mapping = {
+            "fullset": {
+                "mode": 1,
+                "tokens": {"1", "mes", "mes totale", "mes total", "total", "totale", "full", "fullset", "arm", "arme", "armer", "set", "tot"},
+            },
+            "partset_a": {
+                "mode": 2,
+                "tokens": {"2", "part", "partial", "parta", "part a", "partiel", "partiel a", "partset", "partset a", "partseta", "mes partielle", "mes partiel", "mes partielle a", "mes partiel a", "partielle a", "partial a"},
+            },
+            "partset_b": {
+                "mode": 3,
+                "tokens": {"3", "partb", "part b", "partiel b", "partset b", "partsetb", "mes partielle b", "mes partiel b", "partielle b", "partial b"},
+            },
+            "unset": {
+                "mode": 0,
+                "tokens": {"0", "mhs", "unset", "off", "stop", "arret", "arreter", "desarm", "desarme", "desarmer", "desactiv", "desactive", "desactivation", "disarm"},
+            },
+        }
+
+        for action, info in mapping.items():
+            if norm in info["tokens"]:
+                button = f"{action}_{area_suffix}"
+                return button, info["mode"]
+
+        raise ValueError(f"commande '{command}' inconnue")
+
+    def send_area_command(self, area_id: str, command: str):
+        area_num, suffix, area_label = self._resolve_area_suffix(area_id)
+        button, mode = self._command_to_button(suffix, command)
+
+        sid = self.get_or_login()
+        if not sid:
+            raise RuntimeError("Impossible d’obtenir une session")
+
+        def _post_action(current_sid):
+            url = f"{self.host}/secure.htm?session={current_sid}&page=system_summary&action=update"
+            referer = f"{self.host}/secure.htm?session={current_sid}&page=system_summary"
+            data = {button: "1"}
+            if suffix.startswith("area"):
+                num = suffix[4:]
+                if num:
+                    data[f"area_{num}_expanded"] = "1"
+            return self._post(url, data=data, referer=referer)
+
+        try:
+            r = _post_action(sid)
+        except Exception as exc:
+            logging.debug("POST commande secteur échoué, tentative relogin", exc_info=True)
+            sid = self._do_login()
+            if not sid:
+                raise RuntimeError(f"Impossible d’envoyer la commande ({exc})")
+            r = _post_action(sid)
+
+        if self._is_login_response(getattr(r, "text", ""), getattr(r, "url", ""), True):
+            sid = self._do_login()
+            if not sid:
+                raise RuntimeError("Session expirée, relogin impossible")
+            r = _post_action(sid)
+            if self._is_login_response(getattr(r, "text", ""), getattr(r, "url", ""), True):
+                raise RuntimeError("Commande refusée (retour page login)")
+
+        label = area_label or area_num or suffix
+        return {"ok": True, "area_id": area_num or "0", "mode": mode, "button": button, "label": label}
+
 class MQ:
     def __init__(self, cfg: dict):
         m = cfg.get("mqtt", {})
@@ -359,6 +474,9 @@ class MQ:
         self.client_id = m.get("client_id", "spc42-watchdog")
         proto = str(m.get("protocol", "v311")).lower()
         self.protocol = mqtt.MQTTv5 if proto in ("v5", "mqttv5", "5") else mqtt.MQTTv311
+        self.base_parts = [p for p in self.base.split("/") if p]
+        self.command_queue: "queue.Queue" = queue.Queue()
+        self.command_topic = self._topic("secteurs/+/set") or "secteurs/+/set"
 
         client_kwargs = {
             "client_id": self.client_id,
@@ -398,6 +516,12 @@ class MQ:
         def _on_connect(client, userdata, flags, reason_code=0, *rest):
             rc = _normalize_reason_code(reason_code)
             self._set_conn(rc == 0, rc)
+            if rc == 0 and self.command_topic:
+                try:
+                    client.subscribe(self.command_topic, qos=self.qos)
+                    print(f"[MQTT] Souscription commandes: {self.command_topic}")
+                except Exception as exc:
+                    print(f"[MQTT] Souscription impossible ({self.command_topic}): {exc}")
 
         def _on_disconnect(client, userdata, reason_code=0, *rest):
             rc = _normalize_reason_code(reason_code)
@@ -409,6 +533,39 @@ class MQ:
         self.connected = False
         self.client.on_connect = _on_connect
         self.client.on_disconnect = _on_disconnect
+        self.client.on_message = self._on_message
+
+    def _topic(self, suffix: str) -> str:
+        suffix = (suffix or "").strip("/")
+        if not self.base:
+            return suffix
+        if not suffix:
+            return self.base
+        return f"{self.base}/{suffix}"
+
+    def _on_message(self, client, userdata, msg):
+        topic = msg.topic if isinstance(msg.topic, str) else msg.topic.decode("utf-8", "ignore")
+        if not topic:
+            return
+        parts = topic.split("/")
+        if len(parts) < len(self.base_parts) + 3:
+            return
+        if parts[: len(self.base_parts)] != self.base_parts:
+            return
+        sub = parts[len(self.base_parts):]
+        if len(sub) != 3 or sub[0] != "secteurs" or sub[2] != "set":
+            return
+        try:
+            payload = msg.payload.decode("utf-8", errors="ignore").strip()
+        except Exception:
+            payload = ""
+        area = sub[1]
+        if not payload:
+            print(f"[MQTT] Commande ignorée (payload vide) pour secteur {area}")
+            self.pub(f"secteurs/{area}/command_result", "error:payload-empty")
+            return
+        self.command_queue.put((area, payload, topic))
+        print(f"[MQTT] Commande reçue: {topic} → '{payload}'")
 
     def _set_conn(self, ok: bool, rc: int):
         self.connected = ok
@@ -424,18 +581,25 @@ class MQ:
                 self.client.connect(self.host, self.port, keepalive=30)
                 self.client.loop_start()
                 for _ in range(30):
-                    if self.connected: return
+                    if self.connected:
+                        return
                     time.sleep(0.2)
             except Exception as e:
                 print(f"[MQTT] Erreur: {e}")
             time.sleep(2)
 
     def pub(self, topic, payload):
-        full = f"{self.base}/{topic}".strip("/")
+        full = self._topic(topic)
         try:
             self.client.publish(full, payload=str(payload), qos=self.qos, retain=self.retain)
         except Exception as e:
             print(f"[MQTT] publish ERR {full}: {e}")
+
+    def next_command(self):
+        try:
+            return self.command_queue.get_nowait()
+        except queue.Empty:
+            return None
 
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -465,6 +629,15 @@ def main() -> None:
     last_door_state: Dict[str, int] = {}
     last_door_dps: Dict[str, int] = {}
     last_door_drs: Dict[str, int] = {}
+    area_names: Dict[str, str] = {"0": "Tous Secteurs"}
+
+    def record_area_names(areas):
+        for area in areas:
+            sid = SPCClient.area_id(area)
+            if not sid:
+                continue
+            label = area.get("nom") or area.get("secteur") or sid
+            area_names[str(sid)] = label
 
     running = True
     def stop(*_):
@@ -491,6 +664,7 @@ def main() -> None:
             last_z_in[zid] = entree
             mq.pub(f"zones/{zid}/entree", entree)
 
+    record_area_names(snap.get("areas", []))
     for a in snap["areas"]:
         sid = SPCClient.area_id(a)
         if not sid:
@@ -528,7 +702,58 @@ def main() -> None:
 
     print("[SPC→MQTT] État initial publié.")
 
+    command_state_labels = {
+        0: "MHS",
+        1: "MES totale",
+        2: "MES partielle A",
+        3: "MES partielle B",
+        4: "Alarme",
+    }
+
+    def _normalize_area_token(token: str) -> str:
+        tok = (token or "").strip()
+        if not tok:
+            return ""
+        low = tok.lower()
+        if low in ("all", "tous", "all_areas", "toussecteurs", "tous_secteurs", "*"):
+            return "0"
+        if low.startswith("area") and low[4:].isdigit():
+            return str(int(low[4:]))
+        if tok.isdigit():
+            return str(int(tok))
+        return tok
+
+    def process_commands() -> bool:
+        handled = False
+        while True:
+            item = mq.next_command()
+            if item is None:
+                break
+            handled = True
+            area_token, payload, _topic = item
+            tick_cmd = time.strftime("%H:%M:%S")
+            ack_id = _normalize_area_token(area_token)
+            ack_id = ack_id or "unknown"
+            label = area_names.get(ack_id, ack_id)
+            try:
+                result = spc.send_area_command(area_token, payload)
+                ack_id = str(result.get("area_id") or ack_id or "0")
+                label = result.get("label") or area_names.get(ack_id, ack_id)
+                area_names[ack_id] = label
+                mode = int(result.get("mode", -1))
+                status_payload = f"ok:{mode}" if mode >= 0 else "ok"
+                mq.pub(f"secteurs/{ack_id}/command_result", status_payload)
+                if log_changes:
+                    mode_label = command_state_labels.get(mode, str(mode))
+                    print(f"[{tick_cmd}] ✅ Commande secteur '{label}' → {mode_label}")
+            except Exception as err:
+                mq.pub(f"secteurs/{ack_id}/command_result", f"error:{err}")
+                if log_changes:
+                    print(f"[{tick_cmd}] ❌ Commande secteur '{label}' échouée: {err}")
+        return handled
+
     while running:
+        commands_before = process_commands()
         tick = time.strftime("%H:%M:%S")
         try:
             data = spc.fetch()
@@ -536,6 +761,8 @@ def main() -> None:
             print(f"[SPC] fetch ERR: {e}")
             time.sleep(interval)
             continue
+
+        record_area_names(data.get("areas", []))
 
         for z in data["zones"]:
             zid = SPCClient.zone_id_from_name(z)
@@ -587,6 +814,8 @@ def main() -> None:
                         4: "Alarme",
                     }.get(s, str(s))
                     print(f"[{tick}] 🔵 Secteur '{a.get('nom', sid)}' → {state_txt}")
+
+        commands_after = process_commands()
 
         for d in data.get("doors", []):
             did = SPCClient.door_id(d)
@@ -640,7 +869,8 @@ def main() -> None:
                         }.get(drs, str(drs))
                         print(f"[{tick}] 🟤 Libération porte '{dname}' → {drs_txt}")
 
-        time.sleep(interval)
+        if not commands_before and not commands_after:
+            time.sleep(interval)
 
     mq.client.loop_stop()
     try:

@@ -65,6 +65,19 @@ mosquitto_sub -h 127.0.0.1 -t 'acre_XXX/#' -v
 > ℹ️ Les topics `name`, `zone` et `secteur` sont également publiés pour chaque porte (`doors/<id>/…`).
 > ℹ️ L’identifiant `0` dans `secteurs/0/state` représente le statut global « Tous Secteurs » lu sur la page *Etat du système*.
 
+### Topics MQTT commandes
+
+Publiez sur `acre_XXX/secteurs/<id>/set` pour piloter un secteur (ou `0` pour "Tous Secteurs"). Les charges utiles acceptées :
+
+| Valeur | Action envoyée |
+| --- | --- |
+| `0`, `mhs`, `off`, `unset`, `desarm`, `stop`… | Mise Hors Service (désarmement) |
+| `1`, `mes`, `full`, `total`, `totale`, `arm`… | Mise En Service totale |
+| `2`, `part`, `partial`, `parta`, `partiel`, `partielle`… | Mise En Service partielle A |
+| `3`, `partb`, `partiel b`, `partial b`… | Mise En Service partielle B |
+
+Chaque commande publiera un accusé dans `acre_XXX/secteurs/<id>/command_result` (`ok:<code>` ou `error:…`). Les valeurs `ok` reprennent la codification `state` (0 = MHS, 1 = MES, 2 = Partielle A, 3 = Partielle B).
+
 ## 🧹 Désinstallation
 
 ```bash
