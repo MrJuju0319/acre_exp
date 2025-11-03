@@ -187,10 +187,14 @@ class SPCClient:
         norm = SPCClient._normalize_label(token)
         if not norm:
             return ""
-        if any(k in norm for k in ("mes totale", "total", "totale", "tot")):
-            return "MES Totale"
+        if any(k in norm for k in ("mes partiel b", "mes partielle b", "partiel b", "partielle b", "partial b", "part b")):
+            return "MES Partielle B"
+        if any(k in norm for k in ("mes partiel a", "mes partielle a", "partiel a", "partielle a", "partial a", "part a")):
+            return "MES Partielle A"
         if any(k in norm for k in ("mes part", "partiel", "partial", "part")):
             return "MES Partielle"
+        if any(k in norm for k in ("mes totale", "total", "totale", "tot")):
+            return "MES Totale"
         if any(k in norm for k in ("mhs", "desarm", "desactive", "off", "ready")):
             return "MHS"
         if any(k in norm for k in ("alarm", "alarme", "alert")):
@@ -348,17 +352,50 @@ class SPCClient:
         return slug or "unknown"
 
     @staticmethod
+    def door_id_from_name(name: str) -> str:
+        m = re.match(r"^\s*(\d+)\b", name or "")
+        if m:
+            return m.group(1)
+        slug = re.sub(r"[^a-zA-Z0-9]+", "_", name or "").strip("_").lower()
+        return slug or "door"
+
+    @staticmethod
     def _map_area_state(txt):
         s = (txt or "").lower()
-        if "mes totale" in s or "total" in s or "totale" in s: return 2
-        if "mes partiel" in s or "partiel" in s or "partial" in s: return 3
-        if "mhs" in s or "désarm" in s or "desarm" in s or "off" in s or "ready" in s:
+        if "partiel b" in s or "partielle b" in s or "partial b" in s or "part b" in s:
+            return 3
+        if "partiel a" in s or "partielle a" in s or "partial a" in s or "part a" in s:
+            return 2
+        if "mes partiel" in s or "mes partielle" in s or "partiel" in s or "partielle" in s or "partial" in s:
+            return 2
+        if "mes totale" in s or "total" in s or "totale" in s or "tot" in s:
             return 1
+        if "mhs" in s or "désarm" in s or "desarm" in s or "off" in s or "ready" in s:
+            return 0
         if "alarme" in s or "alarm" in s or "alert" in s:
             return 4
         if "trouble" in s or "defaut" in s or "défaut" in s or "fault" in s:
             return 4
-        return 0
+        return -1
+
+    @staticmethod
+    def _map_door_state(txt):
+        s = (txt or "").lower()
+        if not s:
+            return -1
+        if any(k in s for k in ("déverrou", "deverrou", "accès libre", "acces libre", "unlock", "libre")):
+            return 1
+        if any(k in s for k in ("libération", "liberation", "release")):
+            return 1
+        if any(k in s for k in ("ouver", "open")):
+            return 1
+        if any(k in s for k in ("verrouill", "lock")):
+            return 0
+        if "normal" in s or "ferm" in s:
+            return 0
+        if any(k in s for k in ("alarm", "alarme", "trouble", "defaut", "défaut", "fault", "intrus", "force")):
+            return 4
+        return -1
 
     def parse_zones(self, html):
         soup = BeautifulSoup(html, "html.parser")
@@ -450,6 +487,7 @@ class SPCClient:
             state = self._extract_state_text(tds[2])
             if not state:
                 state = self._guess_area_state_label(" ".join(self._attr_values(tds[2])))
+            norm_label = self._normalize_label(label)
             if label.lower().startswith("secteur"):
                 m = re.match(r"^Secteur\s+(\d+)\s*:\s*(.+)$", label, re.I)
                 if m:
@@ -474,7 +512,77 @@ class SPCClient:
                         "etat": area_state,
                         "sid": num,
                     })
+            elif norm_label and (
+                "tous secteurs" in norm_label
+                or "all areas" in norm_label
+                or "toutes les zones" in norm_label
+                or "all sectors" in norm_label
+            ):
+                area_state = self._map_area_state(state)
+                areas.append({
+                    "secteur": label,
+                    "nom": label,
+                    "etat_txt": state,
+                    "etat": area_state,
+                    "sid": "0",
+                })
         return areas
+
+    def parse_doors(self, html):
+        soup = BeautifulSoup(html, "html.parser")
+        grid = soup.find("table", {"class": "gridtable"})
+        doors = []
+        if not grid:
+            return doors
+
+        door_idx, zone_idx, sect_idx = 0, 1, 2
+        dps_idx, drs_idx, state_idx = 3, 4, 5
+        header_labels = []
+
+        for tr in grid.find_all("tr"):
+            header_cells = tr.find_all("th")
+            if header_cells:
+                header_labels = [self._normalize_label(th.get_text(" ", strip=True)) for th in header_cells]
+                door_idx = self._find_column(header_labels, ("porte", "door"), door_idx)
+                zone_idx = self._find_column(header_labels, ("zone",), zone_idx)
+                sect_idx = self._find_column(header_labels, ("secteur", "partition", "area"), sect_idx)
+                dps_idx = self._find_column(header_labels, ("dps", "position", "contact"), dps_idx)
+                drs_idx = self._find_column(header_labels, ("drs", "liber", "release"), drs_idx)
+                state_idx = self._find_column(header_labels, ("etat", "état", "state", "statut"), state_idx)
+                continue
+
+            tds = tr.find_all("td")
+            if len(tds) < 2:
+                continue
+
+            door_td = tds[door_idx] if door_idx is not None and door_idx < len(tds) else tds[0]
+            zone_td = tds[zone_idx] if zone_idx is not None and zone_idx < len(tds) else (tds[1] if len(tds) > 1 else tds[0])
+            sect_td = tds[sect_idx] if sect_idx is not None and sect_idx < len(tds) else (tds[2] if len(tds) > 2 else tds[-1])
+            dps_td = tds[dps_idx] if dps_idx is not None and dps_idx < len(tds) else None
+            drs_td = tds[drs_idx] if drs_idx is not None and drs_idx < len(tds) else None
+            state_td = tds[state_idx] if state_idx is not None and state_idx < len(tds) else (tds[-2] if len(tds) >= 2 else None)
+
+            door_lbl = door_td.get_text(" ", strip=True)
+            zone_lbl = zone_td.get_text(" ", strip=True)
+            sect_lbl = sect_td.get_text(" ", strip=True)
+            dps_txt = self._extract_state_text(dps_td) if dps_td else ""
+            drs_txt = self._extract_state_text(drs_td) if drs_td else ""
+            state_txt = self._extract_state_text(state_td) if state_td else ""
+
+            door_data = {
+                "door": door_lbl,
+                "zone": zone_lbl,
+                "secteur": sect_lbl,
+                "dps_txt": dps_txt,
+                "drs_txt": drs_txt,
+                "etat_txt": state_txt,
+                "dps": self._map_zone_state(dps_txt),
+                "drs": self._map_zone_state(drs_txt),
+                "etat": self._map_door_state(state_txt),
+                "id": self.door_id_from_name(door_lbl),
+            }
+            doors.append(door_data)
+        return doors
 
     def fetch_status(self):
         sid = self.get_or_login()
@@ -513,9 +621,22 @@ class SPCClient:
                 areas = self.parse_areas(r_a.text)
                 logging.debug("areas retry length: %d — parsed: %d", len(r_a.text), len(areas))
 
+        sid, r_d = _fetch("door_status", referer_page="controller_status")
+        logging.debug("Requesting doors from: %s (len=%d)", r_d.url, len(r_d.text))
+        doors = self.parse_doors(r_d.text)
+        if len(doors) == 0 and self._is_login_response(r_d.text, getattr(r_d, "url", ""), True):
+            logging.debug("Doors parse empty + looks like login — re-login once")
+            new_sid = self._do_login()
+            if new_sid:
+                sid = new_sid
+                r_d = self._get(f"{self.host}/secure.htm?session={sid}&page=door_status",
+                                 referer=f"{self.host}/secure.htm?session={sid}&page=controller_status")
+                doors = self.parse_doors(r_d.text)
+                logging.debug("doors retry length: %d — parsed: %d", len(r_d.text), len(doors))
+
         self._save_cookies()
         self._save_session_cache(sid)
-        return {"zones": zones, "areas": areas}
+        return {"zones": zones, "areas": areas, "doors": doors}
 
 def main():
     parser = argparse.ArgumentParser()

@@ -14,10 +14,10 @@ chmod +x install.sh
 
 ```yaml
 spc:
-  host: "http://192.168.1.100"
+  host: "https://192.168.1.100"
   user: "Engineer"
   pin: "1111"
-  language: 253
+  language: 253  # 253 = Français, 0 = Anglais
   session_cache_dir: "/var/lib/acre_exp"
   min_login_interval_sec: 60
 
@@ -35,6 +35,8 @@ watchdog:
   refresh_interval: 2
   log_changes: true
   ```
+
+> ℹ️ **Astuce :** l'adresse `spc.host` peut indifféremment utiliser `http://` ou `https://` selon la configuration de votre centrale.
 
 ## 🔄 Mise à jour
 
@@ -55,7 +57,13 @@ mosquitto_sub -h 127.0.0.1 -t 'acre_XXX/#' -v
 
 * `acre_XXX/zones/<id>/state` — 0 = zone normale, 1 = zone activée.
 * `acre_XXX/zones/<id>/entree` — 1 = entrée fermée, 0 = entrée ouverte/alarme.
-* `acre_XXX/secteurs/<id>/state` — 0 = inconnu, 1 = désarmé, 2 = MES totale, 3 = MES partielle, 4 = alarme.
+* `acre_XXX/secteurs/<id>/state` — 0 = MHS (désarmé), 1 = MES (totale), 2 = MES partielle A, 3 = MES partielle B, 4 = alarme.
+* `acre_XXX/doors/<id>/state` — 0 = porte normale/verrouillée, 1 = porte déverrouillée/accès libre, 4 = alarme.
+* `acre_XXX/doors/<id>/dps` — 0 = contact fermé, 1 = contact ouvert, 2 = isolé, 3 = inhibé, 4 = trouble.
+* `acre_XXX/doors/<id>/drs` — mêmes valeurs que DPS pour le bouton de libération.
+
+> ℹ️ Les topics `name`, `zone` et `secteur` sont également publiés pour chaque porte (`doors/<id>/…`).
+> ℹ️ L’identifiant `0` dans `secteurs/0/state` représente le statut global « Tous Secteurs » lu sur la page *Etat du système*.
 
 ## 🧹 Désinstallation
 

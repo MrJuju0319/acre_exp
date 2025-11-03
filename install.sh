@@ -105,7 +105,14 @@ if [[ "${MODE}" == "--install" ]]; then
   fi
   if [[ "$write_cfg" == "true" ]]; then
     echo -e "${C_GREEN}>>> Paramétrage...${C_RESET}"
-    SPC_HOST_DEFAULT="${SPC_HOST:-http://192.168.1.100}"
+    DEFAULT_SPC_HOST_VALUE="${SPC_HOST:-http://192.168.1.100}"
+    if [[ "${DEFAULT_SPC_HOST_VALUE}" =~ ^https?:// ]]; then
+      SPC_SCHEME_DEFAULT="${DEFAULT_SPC_HOST_VALUE%%://*}"
+      SPC_HOST_DEFAULT="${DEFAULT_SPC_HOST_VALUE#*://}"
+    else
+      SPC_SCHEME_DEFAULT="${SPC_SCHEME:-http}"
+      SPC_HOST_DEFAULT="${DEFAULT_SPC_HOST_VALUE}"
+    fi
     SPC_USER_DEFAULT="${SPC_USER:-Engineer}"
     SPC_PIN_DEFAULT="${SPC_PIN:-1111}"
     SPC_LANG_DEFAULT="${SPC_LANG:-253}"
@@ -123,10 +130,20 @@ if [[ "${MODE}" == "--install" ]]; then
     WD_REFRESH_DEFAULT="${WD_REFRESH:-2}"
     WD_LOG_DEFAULT="${WD_LOG_CHANGES:-true}"
 
-    SPC_HOST="$(ask "Adresse de la centrale (http://IP:PORT)" "$SPC_HOST_DEFAULT")"
+    SPC_SCHEME="$(ask "Protocole de la centrale (http/https)" "$SPC_SCHEME_DEFAULT")"
+    SPC_SCHEME="${SPC_SCHEME,,}"
+    if [[ ! "${SPC_SCHEME}" =~ ^https?$ ]]; then
+      SPC_SCHEME="${SPC_SCHEME_DEFAULT}"
+    fi
+    SPC_HOST_INPUT="$(ask "Adresse de la centrale (IP ou nom DNS)" "$SPC_HOST_DEFAULT")"
+    if [[ "${SPC_HOST_INPUT}" =~ ^https?:// ]]; then
+      SPC_HOST="${SPC_HOST_INPUT}"
+    else
+      SPC_HOST="${SPC_SCHEME}://${SPC_HOST_INPUT}"
+    fi
     SPC_USER="$(ask "Code utilisateur (ID Web)" "$SPC_USER_DEFAULT")"
     SPC_PIN="$(ask "Mot de passe / PIN" "$SPC_PIN_DEFAULT")"
-    SPC_LANG="$(ask "Langue (253=Def user, 2=FR, 0=EN)" "$SPC_LANG_DEFAULT")"
+    SPC_LANG="$(ask "Langue (253=FR, 0=EN)" "$SPC_LANG_DEFAULT")"
     MIN_LOGIN_INTERVAL="$(ask "Délai minimum entre relogins (sec)" "$MIN_LOGIN_INTERVAL_DEFAULT")"
 
     MQTT_HOST="$(ask "MQTT hôte" "$MQTT_HOST_DEFAULT")"

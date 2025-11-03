@@ -169,15 +169,21 @@ class SPCClient(StatusSPCClient):
             etat_txt = area
 
         s = cls._normalize_state_text(etat_txt)
-        if "mes totale" in s:
-            return 2
-        if "mes partiel" in s:
+        if not s:
+            return -1
+        if "partiel b" in s or "partielle b" in s or "partial b" in s or "part b" in s:
             return 3
+        if "partiel a" in s or "partielle a" in s or "partial a" in s or "part a" in s:
+            return 2
+        if "mes partiel" in s or "mes partielle" in s or "partiel" in s or "partielle" in s or "partial" in s:
+            return 2
+        if "mes totale" in s or "total" in s or "totale" in s or "tot" in s:
+            return 1
         if "alarme" in s:
             return 4
-        if "mhs" in s or "désarm" in s:
-            return 1
-        return 0
+        if "mhs" in s or "désarm" in s or "desarm" in s or "desactiv" in s or "desactive" in s:
+            return 0
+        return -1
 
     @staticmethod
     def zone_id_from_name(zone) -> str:
@@ -237,6 +243,66 @@ class SPCClient(StatusSPCClient):
                 return 1
         return -1
 
+    @classmethod
+    def door_id(cls, door) -> str:
+        if isinstance(door, dict):
+            did = door.get("id") or door.get("door")
+            if did:
+                return str(did).strip()
+        return cls.door_id_from_name(door)
+
+    @staticmethod
+    def door_name(door) -> str:
+        if isinstance(door, dict):
+            return str(door.get("door") or door.get("name") or "").strip()
+        return str(door or "")
+
+    @staticmethod
+    def door_zone(door) -> str:
+        if isinstance(door, dict):
+            return str(door.get("zone") or "").strip()
+        return ""
+
+    @staticmethod
+    def door_sector(door) -> str:
+        if isinstance(door, dict):
+            return str(door.get("secteur") or door.get("sector") or "").strip()
+        return ""
+
+    @classmethod
+    def _door_contact(cls, door, key: str) -> int:
+        if isinstance(door, dict):
+            val = door.get(key)
+            if isinstance(val, int) and val >= 0:
+                return val
+            txt = door.get(f"{key}_txt")
+        else:
+            txt = None
+        if not txt:
+            return -1
+        return StatusSPCClient._map_zone_state(txt)
+
+    @classmethod
+    def door_dps(cls, door) -> int:
+        return cls._door_contact(door, "dps")
+
+    @classmethod
+    def door_drs(cls, door) -> int:
+        return cls._door_contact(door, "drs")
+
+    @classmethod
+    def door_state(cls, door) -> int:
+        if isinstance(door, dict):
+            state = door.get("etat")
+            if isinstance(state, int) and state >= 0:
+                return state
+            txt = door.get("etat_txt")
+        else:
+            txt = door
+        if not txt:
+            return -1
+        return StatusSPCClient._map_door_state(txt)
+
     @staticmethod
     def area_id(area) -> str:
         if isinstance(area, dict):
@@ -272,7 +338,13 @@ class SPCClient(StatusSPCClient):
                 if sid:
                     a.setdefault("sid", sid)
 
-        return {"zones": zones, "areas": areas}
+        doors = data.get("doors", [])
+        for d in doors:
+            if isinstance(d, dict):
+                if not d.get("id"):
+                    d["id"] = self.door_id(d)
+
+        return {"zones": zones, "areas": areas, "doors": doors}
 
 class MQ:
     def __init__(self, cfg: dict):
@@ -390,6 +462,9 @@ def main() -> None:
     last_z: Dict[str, int] = {}
     last_z_in: Dict[str, int] = {}
     last_a: Dict[str, int] = {}
+    last_door_state: Dict[str, int] = {}
+    last_door_dps: Dict[str, int] = {}
+    last_door_drs: Dict[str, int] = {}
 
     running = True
     def stop(*_):
@@ -425,6 +500,31 @@ def main() -> None:
         if s >= 0:
             last_a[sid] = s
             mq.pub(f"secteurs/{sid}/state", s)
+
+    for d in snap.get("doors", []):
+        did = SPCClient.door_id(d)
+        dname = SPCClient.door_name(d)
+        if not did or not dname:
+            continue
+        mq.pub(f"doors/{did}/name", dname)
+        zone_lbl = SPCClient.door_zone(d)
+        if zone_lbl:
+            mq.pub(f"doors/{did}/zone", zone_lbl)
+        secteur_lbl = SPCClient.door_sector(d)
+        if secteur_lbl:
+            mq.pub(f"doors/{did}/secteur", secteur_lbl)
+        state = SPCClient.door_state(d)
+        if state >= 0:
+            last_door_state[did] = state
+            mq.pub(f"doors/{did}/state", state)
+        dps = SPCClient.door_dps(d)
+        if dps >= 0:
+            last_door_dps[did] = dps
+            mq.pub(f"doors/{did}/dps", dps)
+        drs = SPCClient.door_drs(d)
+        if drs >= 0:
+            last_door_drs[did] = drs
+            mq.pub(f"doors/{did}/drs", drs)
 
     print("[SPC→MQTT] État initial publié.")
 
@@ -472,12 +572,73 @@ def main() -> None:
             if not sid:
                 continue
             s = SPCClient.area_num(a)
+            if s < 0:
+                continue
             old = last_a.get(sid)
             if old is None or s != old:
                 mq.pub(f"secteurs/{sid}/state", s)
                 last_a[sid] = s
                 if log_changes:
-                    print(f"[{tick}] 🔵 Secteur '{a.get('nom', sid)}' → {s}")
+                    state_txt = {
+                        0: "MHS",
+                        1: "MES",
+                        2: "MES partiel A",
+                        3: "MES partiel B",
+                        4: "Alarme",
+                    }.get(s, str(s))
+                    print(f"[{tick}] 🔵 Secteur '{a.get('nom', sid)}' → {state_txt}")
+
+        for d in data.get("doors", []):
+            did = SPCClient.door_id(d)
+            dname = SPCClient.door_name(d)
+            if not did or not dname:
+                continue
+
+            state = SPCClient.door_state(d)
+            if state >= 0:
+                old_state = last_door_state.get(did)
+                if old_state is None or state != old_state:
+                    mq.pub(f"doors/{did}/state", state)
+                    last_door_state[did] = state
+                    if log_changes:
+                        state_txt = {
+                            0: "normale",
+                            1: "déverrouillée",
+                            4: "alarme",
+                        }.get(state, str(state))
+                        print(f"[{tick}] 🟠 Porte '{dname}' → {state_txt}")
+
+            dps = SPCClient.door_dps(d)
+            if dps >= 0:
+                old_dps = last_door_dps.get(did)
+                if old_dps is None or dps != old_dps:
+                    mq.pub(f"doors/{did}/dps", dps)
+                    last_door_dps[did] = dps
+                    if log_changes:
+                        dps_txt = {
+                            0: "fermée",
+                            1: "ouverte",
+                            2: "isolée",
+                            3: "inhibée",
+                            4: "trouble",
+                        }.get(dps, str(dps))
+                        print(f"[{tick}] 🟣 Contact porte '{dname}' → {dps_txt}")
+
+            drs = SPCClient.door_drs(d)
+            if drs >= 0:
+                old_drs = last_door_drs.get(did)
+                if old_drs is None or drs != old_drs:
+                    mq.pub(f"doors/{did}/drs", drs)
+                    last_door_drs[did] = drs
+                    if log_changes:
+                        drs_txt = {
+                            0: "fermée",
+                            1: "ouverte",
+                            2: "isolée",
+                            3: "inhibée",
+                            4: "trouble",
+                        }.get(drs, str(drs))
+                        print(f"[{tick}] 🟤 Libération porte '{dname}' → {drs_txt}")
 
         time.sleep(interval)
 
