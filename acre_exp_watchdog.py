@@ -7,7 +7,7 @@ import yaml
 import requests
 from bs4 import BeautifulSoup
 from http.cookiejar import MozillaCookieJar
-from typing import Dict
+from typing import Dict, Set
 
 from acre_exp_status import SPCClient as StatusSPCClient
 
@@ -632,6 +632,7 @@ def main() -> None:
     last_door_dps: Dict[str, int] = {}
     last_door_drs: Dict[str, int] = {}
     last_controller: Dict[str, str] = {}
+    cleared_legacy_controller_topics: Set[str] = set()
     area_names: Dict[str, str] = {"0": "Tous Secteurs"}
 
     controller_topic_map = {
@@ -652,6 +653,16 @@ def main() -> None:
             return mapped
         compact = slug.replace("_", "")
         return compact
+
+    def _controller_label_topic(label: str, fallback: str) -> str:
+        label = (label or "").strip()
+        if label:
+            trimmed = label.rstrip(":：").rstrip()
+            if trimmed:
+                label = trimmed
+        if not label:
+            return (fallback or "").strip()
+        return label
 
     def publish_controller_sections(sections, tick_label=None, log_section=False):
         changed = False
@@ -676,13 +687,21 @@ def main() -> None:
                 if isinstance(labels, dict):
                     label = labels.get(key, "")
                 label = label or key
-                topic = f"etat/{topic_suffix}/{label}"
+                topic_label = _controller_label_topic(label, key)
+                topic = f"etat/{topic_suffix}/{topic_label}"
+                legacy_topic = None
+                if topic_label != label:
+                    legacy_topic = f"etat/{topic_suffix}/{label}"
                 payload = str(value)
                 old_payload = last_controller.get(topic)
                 if old_payload == payload:
                     continue
                 last_controller[topic] = payload
                 mq.pub(topic, payload)
+                if legacy_topic and legacy_topic not in cleared_legacy_controller_topics:
+                    mq.pub(legacy_topic, "")
+                    last_controller.pop(legacy_topic, None)
+                    cleared_legacy_controller_topics.add(legacy_topic)
                 changed = True
                 if log_section and tick_label:
                     print(f"[{tick_label}] 🧩 {title} · {label} = {payload}")

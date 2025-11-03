@@ -62,12 +62,12 @@ mosquitto_sub -h 127.0.0.1 -t 'acre_XXX/#' -v
 * `acre_XXX/doors/<id>/dps` — 0 = contact fermé, 1 = contact ouvert, 2 = isolé, 3 = inhibé, 4 = trouble.
 * `acre_XXX/doors/<id>/drs` — mêmes valeurs que DPS pour le bouton de libération.
 * `acre_XXX/etat/<section>/<Libellé>` — valeurs textuelles détaillées issues de l’onglet « Etat Centrale » (sans JSON).
-  * `acre_XXX/etat/système/Heure Système:` — exemple: `Lun, 03 Nov 2025 15:54:11`.
-  * `acre_XXX/etat/alimentation/Batterie:` — exemple: `OK`.
-  * `acre_XXX/etat/ethernet/Adresse IP:` — exemple: `192.168.1.125`.
-  * `acre_XXX/etat/modem1/Etat Modem:` — exemple: `Prêt`.
-  * `acre_XXX/etat/modem2/Etat Modem:` — exemple: `Modem hors service`.
-  * `acre_XXX/etat/X-BUS/Etat du X-BUS:` — exemple: `OK`.
+  * `acre_XXX/etat/système/Heure Système` — exemple: `Lun, 03 Nov 2025 15:54:11`.
+  * `acre_XXX/etat/alimentation/Batterie` — exemple: `OK`.
+  * `acre_XXX/etat/ethernet/Adresse IP` — exemple: `192.168.1.125`.
+  * `acre_XXX/etat/modem1/Etat Modem` — exemple: `Prêt`.
+  * `acre_XXX/etat/modem2/Etat Modem` — exemple: `Modem hors service`.
+  * `acre_XXX/etat/X-BUS/Etat du X-BUS` — exemple: `OK`.
 
 > ℹ️ Les topics `name`, `zone` et `secteur` sont également publiés pour chaque porte (`doors/<id>/…`).
 > ℹ️ L’identifiant `0` dans `secteurs/0/state` représente le statut global « Tous Secteurs » lu sur la page *Etat du système*.
