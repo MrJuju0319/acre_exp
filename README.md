@@ -61,6 +61,12 @@ mosquitto_sub -h 127.0.0.1 -t 'acre_XXX/#' -v
 * `acre_XXX/doors/<id>/state` — 0 = porte normale/verrouillée, 1 = porte déverrouillée/accès libre, 4 = alarme.
 * `acre_XXX/doors/<id>/dps` — 0 = contact fermé, 1 = contact ouvert, 2 = isolé, 3 = inhibé, 4 = trouble.
 * `acre_XXX/doors/<id>/drs` — mêmes valeurs que DPS pour le bouton de libération.
+* `acre_XXX/etat/systeme` — objet JSON reprenant l’heure système et l’état des autosurveillances.
+* `acre_XXX/etat/alimentation` — objet JSON avec les tensions, courants, état secteur 230 V et santé batterie.
+* `acre_XXX/etat/ethernet` — objet JSON avec MAC, IP, DNS, octets échangés, etc.
+* `acre_XXX/etat/modem1` — objet JSON décrivant le modem principal (état, opérateur, ICCID…).
+* `acre_XXX/etat/modem2` — idem pour le modem secondaire s’il est présent.
+* `acre_XXX/etat/x-bus` — objet JSON listant l’état général du bus et des périphériques.
 
 > ℹ️ Les topics `name`, `zone` et `secteur` sont également publiés pour chaque porte (`doors/<id>/…`).
 > ℹ️ L’identifiant `0` dans `secteurs/0/state` représente le statut global « Tous Secteurs » lu sur la page *Etat du système*.

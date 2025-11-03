@@ -322,7 +322,7 @@ class SPCClient(StatusSPCClient):
     def fetch(self):
         data = super().fetch_status()
         if not isinstance(data, dict):
-            return {"zones": [], "areas": []}
+            return {"zones": [], "areas": [], "doors": [], "controller": []}
         if "error" in data:
             raise RuntimeError(data["error"])
 
@@ -345,7 +345,9 @@ class SPCClient(StatusSPCClient):
                 if not d.get("id"):
                     d["id"] = self.door_id(d)
 
-        return {"zones": zones, "areas": areas, "doors": doors}
+        controller = data.get("controller", [])
+
+        return {"zones": zones, "areas": areas, "doors": doors, "controller": controller}
 
     @staticmethod
     def _normalize_command(cmd: str) -> str:
@@ -629,7 +631,53 @@ def main() -> None:
     last_door_state: Dict[str, int] = {}
     last_door_dps: Dict[str, int] = {}
     last_door_drs: Dict[str, int] = {}
+    last_controller: Dict[str, str] = {}
     area_names: Dict[str, str] = {"0": "Tous Secteurs"}
+
+    controller_topic_map = {
+        "systeme": "systeme",
+        "alimentation": "alimentation",
+        "ethernet": "ethernet",
+        "modem_1": "modem1",
+        "modem_2": "modem2",
+        "x_bus": "x-bus",
+    }
+
+    def _controller_topic(slug: str) -> str:
+        slug = (slug or "").strip()
+        if not slug:
+            return ""
+        mapped = controller_topic_map.get(slug)
+        if mapped:
+            return mapped
+        compact = slug.replace("_", "")
+        return compact
+
+    def publish_controller_sections(sections, tick_label=None, log_section=False):
+        changed = False
+        for section in sections or []:
+            if not isinstance(section, dict):
+                continue
+            slug = section.get("slug", "")
+            topic_suffix = _controller_topic(slug)
+            if not topic_suffix:
+                continue
+            values = section.get("values")
+            if not isinstance(values, dict) or not values:
+                continue
+            ordered_keys = sorted(values)
+            payload_dict = {key: values[key] for key in ordered_keys}
+            payload = json.dumps(payload_dict, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            old_payload = last_controller.get(topic_suffix)
+            if old_payload == payload:
+                continue
+            last_controller[topic_suffix] = payload
+            mq.pub(f"etat/{topic_suffix}", payload)
+            changed = True
+            if log_section and tick_label:
+                title = section.get("title") or topic_suffix
+                print(f"[{tick_label}] 🧩 État '{title}' mis à jour ({len(payload_dict)} valeurs)")
+        return changed
 
     def record_area_names(areas):
         for area in areas:
@@ -699,6 +747,8 @@ def main() -> None:
         if drs >= 0:
             last_door_drs[did] = drs
             mq.pub(f"doors/{did}/drs", drs)
+
+    publish_controller_sections(snap.get("controller", []))
 
     print("[SPC→MQTT] État initial publié.")
 
@@ -814,6 +864,8 @@ def main() -> None:
                         4: "Alarme",
                     }.get(s, str(s))
                     print(f"[{tick}] 🔵 Secteur '{a.get('nom', sid)}' → {state_txt}")
+
+        publish_controller_sections(data.get("controller", []), tick, log_changes)
 
         commands_after = process_commands()
 
