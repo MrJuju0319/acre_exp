@@ -60,8 +60,7 @@ mosquitto_sub -h 127.0.0.1 -t 'acre_XXX/#' -v
 * `acre_XXX/zones/<id>/entree` — 1 = entrée fermée, 0 = entrée ouverte/alarme.
 * `acre_XXX/secteurs/<id>/state` — 0 = MHS (désarmé), 1 = MES (totale), 2 = MES partielle A, 3 = MES partielle B, 4 = alarme.
 * `acre_XXX/doors/<id>/state` — 0 = porte normale/verrouillée, 1 = porte déverrouillée/accès libre, 4 = alarme.
-* `acre_XXX/doors/<id>/dps` — 0 = contact fermé, 1 = contact ouvert, 2 = isolé, 3 = inhibé, 4 = trouble.
-* `acre_XXX/doors/<id>/drs` — mêmes valeurs que DPS pour le bouton de libération.
+* `acre_XXX/doors/<id>/drs` — 0 = bouton de sortie relâché (fermé), 1 = bouton appuyé (ouvert).
 * `acre_XXX/etat/<section>/<Libellé>` — valeurs textuelles détaillées issues de l’onglet « Etat Centrale » (sans JSON).
   * `acre_XXX/etat/système/Heure Système` — exemple: `Lun, 03 Nov 2025 15:54:11`.
   * `acre_XXX/etat/alimentation/Batterie` — exemple: `OK`.
@@ -84,6 +83,17 @@ Publiez sur `acre_XXX/secteurs/<id>/set` pour piloter un secteur (ou `0` pour "T
 | `1`, `mes`, `full`, `total`, `totale`, `arm`… | Mise En Service totale |
 | `2`, `part`, `partial`, `parta`, `partiel`, `partielle`… | Mise En Service partielle A |
 | `3`, `partb`, `partiel b`, `partial b`… | Mise En Service partielle B |
+
+Publiez sur `acre_XXX/doors/<id>/set` pour piloter une porte. Les charges utiles acceptées :
+
+| Valeur | Action envoyée |
+| --- | --- |
+| `normal`, `reset`, `standard`… | Bouton **Normal** |
+| `verrouiller`, `lock`, `fermer`… | Bouton **Verrouiller** |
+| `deverrouiller`, `unlock`, `ouvrir`… | Bouton **Déverrouiller** |
+| `impulsion`, `pulse`, `toggle`… | Bouton **Impulsion** |
+
+Chaque commande publie un accusé dans `acre_XXX/doors/<id>/command_result` (`ok:<action>` ou `error:…`).
 
 Chaque commande publiera un accusé dans `acre_XXX/secteurs/<id>/command_result` (`ok:<code>` ou `error:…`). Les valeurs `ok` reprennent la codification `state` (0 = MHS, 1 = MES, 2 = Partielle A, 3 = Partielle B).
 
