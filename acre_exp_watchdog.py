@@ -1111,8 +1111,8 @@ def main() -> None:
                     last_door_drs[did] = drs
                     if log_changes:
                         drs_txt = {
-                            0: "fermé",
-                            1: "ouvert",
+                            0: "fermée",
+                            1: "ouverte",
                         }.get(drs, str(drs))
                         print(f"[{tick}] 🟤 Libération porte '{dname}' → {drs_txt}")
 

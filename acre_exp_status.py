@@ -380,13 +380,17 @@ class SPCClient:
 
     @staticmethod
     def _map_door_release_state(txt, color_hint: str = ""):
-        s = (txt or "").strip().lower()
+        s_raw = (txt or "").strip()
+        s = s_raw.lower()
         if s:
+            # Détection directe sur le texte (avec et sans accents).
             if any(k in s for k in ("ouvr", "open", "liber", "release", "moment")):
                 return 1
-            if any(k in s for k in ("appuy", "press", "active", "actif")):
+            if any(k in s for k in ("appuy", "press", "active", "actif", "pulse", "impuls")):
                 return 1
-            if any(k in s for k in ("ferm", "close", "repos", "relach", "relâch")):
+            if any(k in s for k in ("ferm", "close", "repos", "relach", "relâch", "normal", "rest")):
+                return 0
+            if any(k in s for k in ("libre", "relache", "relâché")):
                 return 0
             if s.isdigit():
                 try:
@@ -394,13 +398,24 @@ class SPCClient:
                 except ValueError:
                     pass
 
+        # Réessayer avec une normalisation (supprime les accents) pour les
+        # chaînes contenant uniquement des caractères accentués.
+        norm = SPCClient._normalize_label(s_raw)
+        if norm:
+            if any(k in norm for k in ("ouvr", "open", "liber", "release", "moment")):
+                return 1
+            if any(k in norm for k in ("appuy", "press", "active", "actif", "pulse", "impuls")):
+                return 1
+            if any(k in norm for k in ("ferm", "close", "repos", "relach", "normal", "rest", "libre")):
+                return 0
+
         color = (color_hint or "").strip().lower()
         if color:
             if any(c in color for c in ("green", "lime", "#0", "vert")):
                 return 1
-            if any(c in color for c in ("red", "rouge", "orange")):
+            if any(c in color for c in ("red", "rouge", "orange", "jaune", "yellow")):
                 return 1
-            if any(c in color for c in ("navy", "blue", "bleu", "black", "noir", "gray", "grey")):
+            if any(c in color for c in ("navy", "blue", "bleu", "black", "noir", "gray", "grey", "#00f", "#000")):
                 return 0
 
         return -1
