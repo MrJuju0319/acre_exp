@@ -584,6 +584,84 @@ class SPCClient:
             doors.append(door_data)
         return doors
 
+    @staticmethod
+    def _slug(text: str) -> str:
+        norm = SPCClient._normalize_label(text)
+        if not norm:
+            return ""
+        slug = re.sub(r"[^a-z0-9]+", "_", norm)
+        slug = re.sub(r"_+", "_", slug).strip("_")
+        return slug
+
+    def parse_controller(self, html):
+        soup = BeautifulSoup(html, "html.parser")
+        sections = []
+
+        for border in soup.select("td.section_border"):
+            title = border.get_text(" ", strip=True)
+            if not title:
+                continue
+
+            section_slug = self._slug(title)
+            if not section_slug:
+                continue
+
+            data_table = None
+            current_tr = border.find_parent("tr")
+            for _ in range(6):
+                if current_tr is None:
+                    break
+                current_tr = current_tr.find_next_sibling("tr")
+                if current_tr is None:
+                    break
+                candidate = current_tr.find("table")
+                if candidate:
+                    data_table = candidate
+                    break
+
+            if data_table is None:
+                continue
+
+            values = {}
+            labels = {}
+
+            for row in data_table.find_all("tr"):
+                cells = row.find_all("td")
+                if len(cells) < 2:
+                    continue
+                key_raw = cells[0].get_text(" ", strip=True)
+                key = key_raw.rstrip(":")
+                if not key:
+                    continue
+
+                val_parts = []
+                for cell in cells[1:]:
+                    txt = cell.get_text(" ", strip=True)
+                    if txt:
+                        val_parts.append(txt)
+                value = " ".join(val_parts).strip()
+                if not value:
+                    continue
+
+                key_slug = self._slug(key)
+                if not key_slug:
+                    continue
+
+                values[key_slug] = value
+                labels[key_slug] = key_raw if key_raw else key
+
+            if not values:
+                continue
+
+            sections.append({
+                "slug": section_slug,
+                "title": title,
+                "values": values,
+                "labels": labels,
+            })
+
+        return sections
+
     def fetch_status(self):
         sid = self.get_or_login()
         if not sid:
@@ -621,6 +699,19 @@ class SPCClient:
                 areas = self.parse_areas(r_a.text)
                 logging.debug("areas retry length: %d — parsed: %d", len(r_a.text), len(areas))
 
+        sid, r_c = _fetch("controller_status", referer_page="controller_status")
+        logging.debug("Requesting controller status from: %s (len=%d)", r_c.url, len(r_c.text))
+        controller = self.parse_controller(r_c.text)
+        if len(controller) == 0 and self._is_login_response(r_c.text, getattr(r_c, "url", ""), True):
+            logging.debug("Controller parse empty + looks like login — re-login once")
+            new_sid = self._do_login()
+            if new_sid:
+                sid = new_sid
+                r_c = self._get(f"{self.host}/secure.htm?session={sid}&page=controller_status",
+                                referer=f"{self.host}/secure.htm?session={sid}&page=controller_status")
+                controller = self.parse_controller(r_c.text)
+                logging.debug("controller retry length: %d — parsed: %d", len(r_c.text), len(controller))
+
         sid, r_d = _fetch("door_status", referer_page="controller_status")
         logging.debug("Requesting doors from: %s (len=%d)", r_d.url, len(r_d.text))
         doors = self.parse_doors(r_d.text)
@@ -630,13 +721,13 @@ class SPCClient:
             if new_sid:
                 sid = new_sid
                 r_d = self._get(f"{self.host}/secure.htm?session={sid}&page=door_status",
-                                 referer=f"{self.host}/secure.htm?session={sid}&page=controller_status")
+                                referer=f"{self.host}/secure.htm?session={sid}&page=controller_status")
                 doors = self.parse_doors(r_d.text)
                 logging.debug("doors retry length: %d — parsed: %d", len(r_d.text), len(doors))
 
         self._save_cookies()
         self._save_session_cache(sid)
-        return {"zones": zones, "areas": areas, "doors": doors}
+        return {"zones": zones, "areas": areas, "doors": doors, "controller": controller}
 
 def main():
     parser = argparse.ArgumentParser()

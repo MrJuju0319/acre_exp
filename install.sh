@@ -30,7 +30,7 @@ Variables optionnelles (exportables avant exécution) :
   REPO_URL, REPO_BRANCH
   SPC_HOST, SPC_USER, SPC_PIN, SPC_LANG, MIN_LOGIN_INTERVAL
   MQTT_HOST, MQTT_PORT, MQTT_USER, MQTT_PASS, MQTT_BASE_TOPIC, MQTT_CLIENT_ID, MQTT_QOS, MQTT_RETAIN
-  WD_REFRESH, WD_LOG_CHANGES
+  WD_REFRESH, WD_CONTROLLER_REFRESH, WD_LOG_CHANGES
 EOF
 }
 
@@ -51,6 +51,42 @@ normalize_repo_files() {
     [[ -f "$p" ]] || continue
     awk 'NR==1{sub(/^\xef\xbb\xbf/,"")}{print}' "$p" > "$p.tmp" && mv "$p.tmp" "$p"
   done
+}
+
+ensure_controller_refresh_config() {
+  [[ -f "$CFG_FILE" ]] || return 0
+  if grep -q "^[[:space:]]*controller_refresh_interval:" "$CFG_FILE"; then
+    return 0
+  fi
+
+  echo -e "${C_GREEN}>>> Mise à jour config: ajout watchdog.controller_refresh_interval${C_RESET}"
+  local tmp
+  tmp="$(mktemp)"
+  awk '
+    BEGIN { added = 0; in_wd = 0; }
+    {
+      if ($0 ~ /^[[:space:]]*watchdog:/) { in_wd = 1 }
+      else if (in_wd && $0 ~ /^[^[:space:]]/) {
+        if (!added) { print "  controller_refresh_interval: 60"; added = 1 }
+        in_wd = 0
+      }
+
+      print
+
+      if (in_wd && $0 ~ /refresh_interval:/ && !added) {
+        print "  controller_refresh_interval: 60"
+        added = 1
+      }
+    }
+    END {
+      if (in_wd && !added) {
+        print "  controller_refresh_interval: 60"
+      }
+    }
+  ' "$CFG_FILE" >"$tmp"
+
+  mv "$tmp" "$CFG_FILE"
+  chmod 640 "$CFG_FILE"
 }
 
 echo -e "${C_GREEN}>>> Vérification des paquets système...${C_RESET}"
@@ -128,6 +164,7 @@ if [[ "${MODE}" == "--install" ]]; then
     MQTT_RETAIN_DEFAULT="${MQTT_RETAIN:-true}"
 
     WD_REFRESH_DEFAULT="${WD_REFRESH:-2}"
+    WD_CONTROLLER_REFRESH_DEFAULT="${WD_CONTROLLER_REFRESH:-60}"
     WD_LOG_DEFAULT="${WD_LOG_CHANGES:-true}"
 
     SPC_SCHEME="$(ask "Protocole de la centrale (http/https)" "$SPC_SCHEME_DEFAULT")"
@@ -156,6 +193,7 @@ if [[ "${MODE}" == "--install" ]]; then
     MQTT_RETAIN="$(ask "MQTT retain (true/false)" "$MQTT_RETAIN_DEFAULT")"
 
     WD_REFRESH="$(ask "Intervalle de refresh watchdog (sec)" "$WD_REFRESH_DEFAULT")"
+    WD_CONTROLLER_REFRESH="$(ask "Intervalle refresh état centrale (sec)" "$WD_CONTROLLER_REFRESH_DEFAULT")"
     WD_LOG_CHANGES="$(ask "Logs des changements (true/false)" "$WD_LOG_DEFAULT")"
 
     echo -e "${C_GREEN}>>> Écriture: ${CFG_FILE}${C_RESET}"
@@ -181,6 +219,7 @@ mqtt:
 
 watchdog:
   refresh_interval: ${WD_REFRESH}
+  controller_refresh_interval: ${WD_CONTROLLER_REFRESH}
   log_changes: ${WD_LOG_CHANGES}
 YAML
     chmod 640 "$CFG_FILE"
@@ -188,6 +227,8 @@ YAML
     echo -e "${C_GREEN}>>> On conserve la configuration existante.${C_RESET}"
   fi
 fi
+
+ensure_controller_refresh_config
 
 # --- Installation des scripts (copie) ---
 echo -e "${C_GREEN}>>> Installation des scripts${C_RESET}"
