@@ -63,6 +63,7 @@ mosquitto_sub -h 127.0.0.1 -t 'acre_XXX/#' -v
 * `acre_XXX/doors/<id>/drs` — mêmes valeurs que DPS pour le bouton de libération.
 
 > ℹ️ Les topics `name`, `zone` et `secteur` sont également publiés pour chaque porte (`doors/<id>/…`).
+> ℹ️ L’identifiant `0` dans `secteurs/0/state` représente le statut global « Tous Secteurs » lu sur la page *Etat du système*.
 
 ## 🧹 Désinstallation
 

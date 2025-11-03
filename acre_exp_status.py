@@ -487,6 +487,7 @@ class SPCClient:
             state = self._extract_state_text(tds[2])
             if not state:
                 state = self._guess_area_state_label(" ".join(self._attr_values(tds[2])))
+            norm_label = self._normalize_label(label)
             if label.lower().startswith("secteur"):
                 m = re.match(r"^Secteur\s+(\d+)\s*:\s*(.+)$", label, re.I)
                 if m:
@@ -511,6 +512,20 @@ class SPCClient:
                         "etat": area_state,
                         "sid": num,
                     })
+            elif norm_label and (
+                "tous secteurs" in norm_label
+                or "all areas" in norm_label
+                or "toutes les zones" in norm_label
+                or "all sectors" in norm_label
+            ):
+                area_state = self._map_area_state(state)
+                areas.append({
+                    "secteur": label,
+                    "nom": label,
+                    "etat_txt": state,
+                    "etat": area_state,
+                    "sid": "0",
+                })
         return areas
 
     def parse_doors(self, html):
