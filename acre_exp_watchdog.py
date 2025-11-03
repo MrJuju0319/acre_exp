@@ -277,11 +277,13 @@ class SPCClient(StatusSPCClient):
             if isinstance(val, int) and val >= 0:
                 return val
             txt = door.get("drs_txt")
+            color = door.get("drs_color")
         else:
             txt = None
-        if not txt:
+            color = ""
+        if not txt and not color:
             return -1
-        return StatusSPCClient._map_door_release_state(txt)
+        return StatusSPCClient._map_door_release_state(txt, color)
 
     @classmethod
     def door_state(cls, door) -> int:

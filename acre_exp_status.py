@@ -379,14 +379,30 @@ class SPCClient:
         return -1
 
     @staticmethod
-    def _map_door_release_state(txt):
+    def _map_door_release_state(txt, color_hint: str = ""):
         s = (txt or "").strip().lower()
-        if not s:
-            return -1
-        if "ouvr" in s or "open" in s:
-            return 1
-        if "ferm" in s or "close" in s:
-            return 0
+        if s:
+            if any(k in s for k in ("ouvr", "open", "liber", "release", "moment")):
+                return 1
+            if any(k in s for k in ("appuy", "press", "active", "actif")):
+                return 1
+            if any(k in s for k in ("ferm", "close", "repos", "relach", "relâch")):
+                return 0
+            if s.isdigit():
+                try:
+                    return 1 if int(s) != 0 else 0
+                except ValueError:
+                    pass
+
+        color = (color_hint or "").strip().lower()
+        if color:
+            if any(c in color for c in ("green", "lime", "#0", "vert")):
+                return 1
+            if any(c in color for c in ("red", "rouge", "orange")):
+                return 1
+            if any(c in color for c in ("navy", "blue", "bleu", "black", "noir", "gray", "grey")):
+                return 0
+
         return -1
 
     @staticmethod
@@ -575,6 +591,7 @@ class SPCClient:
             zone_lbl = zone_td.get_text(" ", strip=True)
             sect_lbl = sect_td.get_text(" ", strip=True)
             drs_txt = self._extract_state_text(drs_td) if drs_td else ""
+            drs_color = self._color_hint(drs_td) if drs_td else ""
             state_txt = self._extract_state_text(state_td) if state_td else ""
 
             door_data = {
@@ -582,8 +599,9 @@ class SPCClient:
                 "zone": zone_lbl,
                 "secteur": sect_lbl,
                 "drs_txt": drs_txt,
+                "drs_color": drs_color,
                 "etat_txt": state_txt,
-                "drs": self._map_door_release_state(drs_txt),
+                "drs": self._map_door_release_state(drs_txt, drs_color),
                 "etat": self._map_door_state(state_txt),
                 "id": self.door_id_from_name(door_lbl),
             }
