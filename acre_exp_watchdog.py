@@ -1,7 +1,7 @@
 #!/opt/spc-venv/bin/python3
 # -*- coding: utf-8 -*-
 
-import os, re, sys, time, json, argparse, signal, logging, warnings
+import os, re, sys, time, argparse, signal, logging, warnings
 import queue
 import yaml
 import requests
@@ -635,12 +635,12 @@ def main() -> None:
     area_names: Dict[str, str] = {"0": "Tous Secteurs"}
 
     controller_topic_map = {
-        "systeme": "systeme",
+        "systeme": "système",
         "alimentation": "alimentation",
         "ethernet": "ethernet",
         "modem_1": "modem1",
         "modem_2": "modem2",
-        "x_bus": "x-bus",
+        "x_bus": "X-BUS",
     }
 
     def _controller_topic(slug: str) -> str:
@@ -665,18 +665,27 @@ def main() -> None:
             values = section.get("values")
             if not isinstance(values, dict) or not values:
                 continue
+            labels = section.get("labels")
             ordered_keys = sorted(values)
-            payload_dict = {key: values[key] for key in ordered_keys}
-            payload = json.dumps(payload_dict, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            old_payload = last_controller.get(topic_suffix)
-            if old_payload == payload:
-                continue
-            last_controller[topic_suffix] = payload
-            mq.pub(f"etat/{topic_suffix}", payload)
-            changed = True
-            if log_section and tick_label:
-                title = section.get("title") or topic_suffix
-                print(f"[{tick_label}] 🧩 État '{title}' mis à jour ({len(payload_dict)} valeurs)")
+            title = section.get("title") or topic_suffix
+            for key in ordered_keys:
+                value = values.get(key)
+                if value is None:
+                    continue
+                label = ""
+                if isinstance(labels, dict):
+                    label = labels.get(key, "")
+                label = label or key
+                topic = f"etat/{topic_suffix}/{label}"
+                payload = str(value)
+                old_payload = last_controller.get(topic)
+                if old_payload == payload:
+                    continue
+                last_controller[topic] = payload
+                mq.pub(topic, payload)
+                changed = True
+                if log_section and tick_label:
+                    print(f"[{tick_label}] 🧩 {title} · {label} = {payload}")
         return changed
 
     def record_area_names(areas):

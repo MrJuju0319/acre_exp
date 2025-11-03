@@ -629,7 +629,8 @@ class SPCClient:
                 cells = row.find_all("td")
                 if len(cells) < 2:
                     continue
-                key = cells[0].get_text(" ", strip=True).rstrip(":")
+                key_raw = cells[0].get_text(" ", strip=True)
+                key = key_raw.rstrip(":")
                 if not key:
                     continue
 
@@ -647,7 +648,7 @@ class SPCClient:
                     continue
 
                 values[key_slug] = value
-                labels[key_slug] = key
+                labels[key_slug] = key_raw if key_raw else key
 
             if not values:
                 continue
