@@ -43,6 +43,7 @@ watchdog:
 
 ```bash
 cd /usr/local/src/acre_exp
+chmod +x install.sh
 ./install.sh --update
 ```
 🔍 Vérifications
