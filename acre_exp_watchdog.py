@@ -505,27 +505,32 @@ class SPCClient(StatusSPCClient):
                 "tokens": {"normal", "reset", "std", "standard"},
                 "value": "Normal",
                 "label": "Normal",
+                "button_prefix": "normal",
             },
             "lock": {
                 "tokens": {"lock", "verrou", "verrouille", "verrouiller", "fermer", "ferme", "close"},
                 "value": "Verrouiller",
                 "label": "Verrouiller",
+                "button_prefix": "lock",
             },
             "unlock": {
                 "tokens": {"unlock", "deverrou", "deverrouille", "deverrouiller", "ouvrir", "open", "liberer", "liberation", "acces libre", "access libre"},
                 "value": "Déverrouiller",
                 "label": "Déverrouiller",
+                "button_prefix": "unlock",
             },
             "pulse": {
                 "tokens": {"pulse", "impulsion", "impulse", "impultion", "moment", "toggle"},
                 "value": "Impulsion",
                 "label": "Impulsion",
+                "button_prefix": "momentary",
             },
         }
 
         for action, info in mapping.items():
             if norm in info["tokens"]:
-                button = f"{action}{door_num}"
+                prefix = info.get("button_prefix") or action
+                button = f"{prefix}{door_num}"
                 return button, info["value"], action, info["label"]
 
         raise ValueError(f"commande '{command}' inconnue")
