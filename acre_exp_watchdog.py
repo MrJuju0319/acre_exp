@@ -616,13 +616,33 @@ def main() -> None:
 
     cfg = load_cfg(args.config)
     wd  = cfg.get("watchdog", {})
-    interval = int(wd.get("refresh_interval", 2))
+    try:
+        interval = int(wd.get("refresh_interval", 2))
+    except Exception:
+        interval = 2
+    if interval < 1:
+        interval = 1
+
+    try:
+        controller_interval = int(wd.get("controller_refresh_interval", 60))
+    except Exception:
+        controller_interval = 60
+    if controller_interval < 1:
+        controller_interval = 1
+
     log_changes = bool(wd.get("log_changes", True))
 
     spc = SPCClient(cfg, debug=args.debug)
     mq  = MQ(cfg)
 
-    print(f"[SPC→MQTT] Démarrage (refresh={interval}s) — Broker {mq.host}:{mq.port}")
+    print(
+        "[SPC→MQTT] Démarrage (refresh={zones}s, controller_refresh={ctrl}s) — Broker {host}:{port}".format(
+            zones=interval,
+            ctrl=controller_interval,
+            host=mq.host,
+            port=mq.port,
+        )
+    )
     mq.connect()
 
     last_z: Dict[str, int] = {}
@@ -777,6 +797,7 @@ def main() -> None:
             mq.pub(f"doors/{did}/drs", drs)
 
     publish_controller_sections(snap.get("controller", []))
+    next_controller_publish = time.monotonic() + controller_interval
 
     print("[SPC→MQTT] État initial publié.")
 
@@ -893,7 +914,10 @@ def main() -> None:
                     }.get(s, str(s))
                     print(f"[{tick}] 🔵 Secteur '{a.get('nom', sid)}' → {state_txt}")
 
-        publish_controller_sections(data.get("controller", []), tick, log_changes)
+        now_monotonic = time.monotonic()
+        if now_monotonic >= next_controller_publish:
+            publish_controller_sections(data.get("controller", []), tick, log_changes)
+            next_controller_publish = now_monotonic + controller_interval
 
         commands_after = process_commands()
 

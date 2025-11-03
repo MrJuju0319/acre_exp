@@ -33,6 +33,7 @@ mqtt:
 
 watchdog:
   refresh_interval: 2
+  controller_refresh_interval: 60
   log_changes: true
   ```
 
@@ -68,6 +69,7 @@ mosquitto_sub -h 127.0.0.1 -t 'acre_XXX/#' -v
   * `acre_XXX/etat/modem1/Etat Modem` — exemple: `Prêt`.
   * `acre_XXX/etat/modem2/Etat Modem` — exemple: `Modem hors service`.
   * `acre_XXX/etat/X-BUS/Etat du X-BUS` — exemple: `OK`.
+  * Rafraîchissement configurable (par défaut 60 s) via `watchdog.controller_refresh_interval`.
 
 > ℹ️ Les topics `name`, `zone` et `secteur` sont également publiés pour chaque porte (`doors/<id>/…`).
 > ℹ️ L’identifiant `0` dans `secteurs/0/state` représente le statut global « Tous Secteurs » lu sur la page *Etat du système*.
