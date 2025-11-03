@@ -271,25 +271,17 @@ class SPCClient(StatusSPCClient):
         return ""
 
     @classmethod
-    def _door_contact(cls, door, key: str) -> int:
+    def door_drs(cls, door) -> int:
         if isinstance(door, dict):
-            val = door.get(key)
+            val = door.get("drs")
             if isinstance(val, int) and val >= 0:
                 return val
-            txt = door.get(f"{key}_txt")
+            txt = door.get("drs_txt")
         else:
             txt = None
         if not txt:
             return -1
-        return StatusSPCClient._map_zone_state(txt)
-
-    @classmethod
-    def door_dps(cls, door) -> int:
-        return cls._door_contact(door, "dps")
-
-    @classmethod
-    def door_drs(cls, door) -> int:
-        return cls._door_contact(door, "drs")
+        return StatusSPCClient._map_door_release_state(txt)
 
     @classmethod
     def door_state(cls, door) -> int:
@@ -463,6 +455,125 @@ class SPCClient(StatusSPCClient):
         label = area_label or area_num or suffix
         return {"ok": True, "area_id": area_num or "0", "mode": mode, "button": button, "label": label}
 
+    def _resolve_door_number(self, door_id: str):
+        if door_id is None:
+            raise ValueError("identifiant de porte manquant")
+
+        raw = str(door_id).strip()
+        if not raw:
+            raise ValueError("identifiant de porte vide")
+
+        norm = self._normalize_command(raw)
+        if raw.isdigit():
+            num = str(int(raw))
+            return num, f"Porte {num}"
+
+        try:
+            data = self.fetch()
+        except Exception:
+            data = {"doors": []}
+
+        for door in data.get("doors", []):
+            did = str(door.get("id") or door.get("door") or "").strip()
+            name = str(door.get("door") or door.get("name") or "").strip()
+            zone_lbl = str(door.get("zone") or "").strip()
+            secteur_lbl = str(door.get("secteur") or door.get("sector") or "").strip()
+            label = zone_lbl or secteur_lbl or name or did
+
+            candidates = [did, name, zone_lbl, secteur_lbl]
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                cand_norm = self._normalize_command(candidate)
+                if cand_norm == norm or candidate == raw:
+                    if did:
+                        num = did if not did.isdigit() else str(int(did))
+                        return num, label or f"Porte {num}"
+            if did and self._normalize_command(did) == norm:
+                num = did if not did.isdigit() else str(int(did))
+                return num, label or f"Porte {num}"
+
+        raise ValueError(f"porte '{raw}' introuvable")
+
+    def _door_command_to_button(self, door_num: str, command: str):
+        norm = self._normalize_command(command)
+        if not norm:
+            raise ValueError("commande vide")
+
+        mapping = {
+            "normal": {
+                "tokens": {"normal", "reset", "std", "standard"},
+                "value": "Normal",
+                "label": "Normal",
+            },
+            "lock": {
+                "tokens": {"lock", "verrou", "verrouille", "verrouiller", "fermer", "ferme", "close"},
+                "value": "Verrouiller",
+                "label": "Verrouiller",
+            },
+            "unlock": {
+                "tokens": {"unlock", "deverrou", "deverrouille", "deverrouiller", "ouvrir", "open", "liberer", "liberation", "acces libre", "access libre"},
+                "value": "Déverrouiller",
+                "label": "Déverrouiller",
+            },
+            "pulse": {
+                "tokens": {"pulse", "impulsion", "impulse", "impultion", "moment", "toggle"},
+                "value": "Impulsion",
+                "label": "Impulsion",
+            },
+        }
+
+        for action, info in mapping.items():
+            if norm in info["tokens"]:
+                button = f"{action}{door_num}"
+                return button, info["value"], action, info["label"]
+
+        raise ValueError(f"commande '{command}' inconnue")
+
+    def send_door_command(self, door_id: str, command: str):
+        door_num, door_label = self._resolve_door_number(door_id)
+        button, value, action, action_label = self._door_command_to_button(door_num, command)
+
+        sid = self.get_or_login()
+        if not sid:
+            raise RuntimeError("Impossible d’obtenir une session")
+
+        def _post_action(current_sid):
+            url = (
+                f"{self.host}/secure.htm?session={current_sid}&page=door_status"
+                f"&action=update&door={door_num}"
+            )
+            referer = f"{self.host}/secure.htm?session={current_sid}&page=door_status"
+            data = {button: value}
+            return self._post(url, data=data, referer=referer)
+
+        try:
+            r = _post_action(sid)
+        except Exception as exc:
+            logging.debug("POST commande porte échoué, tentative relogin", exc_info=True)
+            sid = self._do_login()
+            if not sid:
+                raise RuntimeError(f"Impossible d’envoyer la commande porte ({exc})")
+            r = _post_action(sid)
+
+        if self._is_login_response(getattr(r, "text", ""), getattr(r, "url", ""), True):
+            sid = self._do_login()
+            if not sid:
+                raise RuntimeError("Session expirée, relogin impossible")
+            r = _post_action(sid)
+            if self._is_login_response(getattr(r, "text", ""), getattr(r, "url", ""), True):
+                raise RuntimeError("Commande porte refusée (retour page login)")
+
+        label = door_label or door_num
+        return {
+            "ok": True,
+            "door_id": door_num,
+            "button": button,
+            "action": action,
+            "action_label": action_label,
+            "label": label,
+        }
+
 class MQ:
     def __init__(self, cfg: dict):
         m = cfg.get("mqtt", {})
@@ -478,7 +589,10 @@ class MQ:
         self.protocol = mqtt.MQTTv5 if proto in ("v5", "mqttv5", "5") else mqtt.MQTTv311
         self.base_parts = [p for p in self.base.split("/") if p]
         self.command_queue: "queue.Queue" = queue.Queue()
-        self.command_topic = self._topic("secteurs/+/set") or "secteurs/+/set"
+        self.command_topics = [
+            self._topic("secteurs/+/set") or "secteurs/+/set",
+            self._topic("doors/+/set") or "doors/+/set",
+        ]
 
         client_kwargs = {
             "client_id": self.client_id,
@@ -518,12 +632,13 @@ class MQ:
         def _on_connect(client, userdata, flags, reason_code=0, *rest):
             rc = _normalize_reason_code(reason_code)
             self._set_conn(rc == 0, rc)
-            if rc == 0 and self.command_topic:
-                try:
-                    client.subscribe(self.command_topic, qos=self.qos)
-                    print(f"[MQTT] Souscription commandes: {self.command_topic}")
-                except Exception as exc:
-                    print(f"[MQTT] Souscription impossible ({self.command_topic}): {exc}")
+            if rc == 0:
+                for topic_name in self.command_topics:
+                    try:
+                        client.subscribe(topic_name, qos=self.qos)
+                        print(f"[MQTT] Souscription commandes: {topic_name}")
+                    except Exception as exc:
+                        print(f"[MQTT] Souscription impossible ({topic_name}): {exc}")
 
         def _on_disconnect(client, userdata, reason_code=0, *rest):
             rc = _normalize_reason_code(reason_code)
@@ -555,18 +670,25 @@ class MQ:
         if parts[: len(self.base_parts)] != self.base_parts:
             return
         sub = parts[len(self.base_parts):]
-        if len(sub) != 3 or sub[0] != "secteurs" or sub[2] != "set":
+        if len(sub) != 3 or sub[2] != "set":
+            return
+        category = sub[0]
+        if category == "secteurs":
+            cmd_type = "area"
+        elif category == "doors":
+            cmd_type = "door"
+        else:
             return
         try:
             payload = msg.payload.decode("utf-8", errors="ignore").strip()
         except Exception:
             payload = ""
-        area = sub[1]
+        target = sub[1]
         if not payload:
-            print(f"[MQTT] Commande ignorée (payload vide) pour secteur {area}")
-            self.pub(f"secteurs/{area}/command_result", "error:payload-empty")
+            print(f"[MQTT] Commande ignorée (payload vide) pour {category[:-1]} {target}")
+            self.pub(f"{category}/{target}/command_result", "error:payload-empty")
             return
-        self.command_queue.put((area, payload, topic))
+        self.command_queue.put((cmd_type, target, payload, topic))
         print(f"[MQTT] Commande reçue: {topic} → '{payload}'")
 
     def _set_conn(self, ok: bool, rc: int):
@@ -649,8 +771,8 @@ def main() -> None:
     last_z_in: Dict[str, int] = {}
     last_a: Dict[str, int] = {}
     last_door_state: Dict[str, int] = {}
-    last_door_dps: Dict[str, int] = {}
     last_door_drs: Dict[str, int] = {}
+    door_names: Dict[str, str] = {}
     last_controller: Dict[str, str] = {}
     cleared_legacy_controller_topics: Set[str] = set()
     area_names: Dict[str, str] = {"0": "Tous Secteurs"}
@@ -783,14 +905,11 @@ def main() -> None:
         secteur_lbl = SPCClient.door_sector(d)
         if secteur_lbl:
             mq.pub(f"doors/{did}/secteur", secteur_lbl)
+        door_names[did] = zone_lbl or secteur_lbl or dname
         state = SPCClient.door_state(d)
         if state >= 0:
             last_door_state[did] = state
             mq.pub(f"doors/{did}/state", state)
-        dps = SPCClient.door_dps(d)
-        if dps >= 0:
-            last_door_dps[did] = dps
-            mq.pub(f"doors/{did}/dps", dps)
         drs = SPCClient.door_drs(d)
         if drs >= 0:
             last_door_drs[did] = drs
@@ -829,26 +948,59 @@ def main() -> None:
             if item is None:
                 break
             handled = True
-            area_token, payload, _topic = item
+            cmd_type, target, payload, _topic = item
             tick_cmd = time.strftime("%H:%M:%S")
-            ack_id = _normalize_area_token(area_token)
-            ack_id = ack_id or "unknown"
-            label = area_names.get(ack_id, ack_id)
-            try:
-                result = spc.send_area_command(area_token, payload)
-                ack_id = str(result.get("area_id") or ack_id or "0")
-                label = result.get("label") or area_names.get(ack_id, ack_id)
-                area_names[ack_id] = label
-                mode = int(result.get("mode", -1))
-                status_payload = f"ok:{mode}" if mode >= 0 else "ok"
-                mq.pub(f"secteurs/{ack_id}/command_result", status_payload)
-                if log_changes:
-                    mode_label = command_state_labels.get(mode, str(mode))
-                    print(f"[{tick_cmd}] ✅ Commande secteur '{label}' → {mode_label}")
-            except Exception as err:
-                mq.pub(f"secteurs/{ack_id}/command_result", f"error:{err}")
-                if log_changes:
-                    print(f"[{tick_cmd}] ❌ Commande secteur '{label}' échouée: {err}")
+
+            if cmd_type == "area":
+                area_token = target
+                ack_id = _normalize_area_token(area_token)
+                ack_id = ack_id or "unknown"
+                label = area_names.get(ack_id, ack_id)
+                try:
+                    result = spc.send_area_command(area_token, payload)
+                    ack_id = str(result.get("area_id") or ack_id or "0")
+                    label = result.get("label") or area_names.get(ack_id, ack_id)
+                    area_names[ack_id] = label
+                    mode = int(result.get("mode", -1))
+                    status_payload = f"ok:{mode}" if mode >= 0 else "ok"
+                    mq.pub(f"secteurs/{ack_id}/command_result", status_payload)
+                    if log_changes:
+                        mode_label = command_state_labels.get(mode, str(mode))
+                        print(f"[{tick_cmd}] ✅ Commande secteur '{label}' → {mode_label}")
+                except Exception as err:
+                    mq.pub(f"secteurs/{ack_id}/command_result", f"error:{err}")
+                    if log_changes:
+                        print(f"[{tick_cmd}] ❌ Commande secteur '{label}' échouée: {err}")
+                continue
+
+            if cmd_type == "door":
+                door_token = target
+                ack_id = str(door_token).strip()
+                if not ack_id:
+                    ack_id = "unknown"
+                label = door_names.get(ack_id, ack_id)
+                try:
+                    result = spc.send_door_command(door_token, payload)
+                    ack_id = str(result.get("door_id") or ack_id or "unknown")
+                    label = result.get("label") or door_names.get(ack_id, ack_id)
+                    if ack_id:
+                        door_names[ack_id] = label
+                    action_code = str(result.get("action") or "").strip()
+                    action_label = result.get("action_label") or action_code or payload
+                    status_payload = f"ok:{action_code}" if action_code else "ok"
+                    ack_topic_id = ack_id or "unknown"
+                    mq.pub(f"doors/{ack_topic_id}/command_result", status_payload)
+                    if log_changes:
+                        print(f"[{tick_cmd}] ✅ Commande porte '{label}' → {action_label}")
+                except Exception as err:
+                    ack_topic_id = ack_id or "unknown"
+                    mq.pub(f"doors/{ack_topic_id}/command_result", f"error:{err}")
+                    if log_changes:
+                        print(f"[{tick_cmd}] ❌ Commande porte '{label}' échouée: {err}")
+                continue
+
+            if log_changes:
+                print(f"[{tick_cmd}] ⚠️ Commande inconnue ignorée: {item}")
         return handled
 
     while running:
@@ -926,6 +1078,9 @@ def main() -> None:
             dname = SPCClient.door_name(d)
             if not did or not dname:
                 continue
+            zone_lbl = SPCClient.door_zone(d)
+            secteur_lbl = SPCClient.door_sector(d)
+            door_names[did] = zone_lbl or secteur_lbl or dname
 
             state = SPCClient.door_state(d)
             if state >= 0:
@@ -941,22 +1096,6 @@ def main() -> None:
                         }.get(state, str(state))
                         print(f"[{tick}] 🟠 Porte '{dname}' → {state_txt}")
 
-            dps = SPCClient.door_dps(d)
-            if dps >= 0:
-                old_dps = last_door_dps.get(did)
-                if old_dps is None or dps != old_dps:
-                    mq.pub(f"doors/{did}/dps", dps)
-                    last_door_dps[did] = dps
-                    if log_changes:
-                        dps_txt = {
-                            0: "fermée",
-                            1: "ouverte",
-                            2: "isolée",
-                            3: "inhibée",
-                            4: "trouble",
-                        }.get(dps, str(dps))
-                        print(f"[{tick}] 🟣 Contact porte '{dname}' → {dps_txt}")
-
             drs = SPCClient.door_drs(d)
             if drs >= 0:
                 old_drs = last_door_drs.get(did)
@@ -965,11 +1104,8 @@ def main() -> None:
                     last_door_drs[did] = drs
                     if log_changes:
                         drs_txt = {
-                            0: "fermée",
-                            1: "ouverte",
-                            2: "isolée",
-                            3: "inhibée",
-                            4: "trouble",
+                            0: "fermé",
+                            1: "ouvert",
                         }.get(drs, str(drs))
                         print(f"[{tick}] 🟤 Libération porte '{dname}' → {drs_txt}")
 

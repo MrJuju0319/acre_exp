@@ -379,6 +379,17 @@ class SPCClient:
         return -1
 
     @staticmethod
+    def _map_door_release_state(txt):
+        s = (txt or "").strip().lower()
+        if not s:
+            return -1
+        if "ouvr" in s or "open" in s:
+            return 1
+        if "ferm" in s or "close" in s:
+            return 0
+        return -1
+
+    @staticmethod
     def _map_door_state(txt):
         s = (txt or "").lower()
         if not s:
@@ -536,7 +547,7 @@ class SPCClient:
             return doors
 
         door_idx, zone_idx, sect_idx = 0, 1, 2
-        dps_idx, drs_idx, state_idx = 3, 4, 5
+        drs_idx, state_idx = 4, 5
         header_labels = []
 
         for tr in grid.find_all("tr"):
@@ -546,7 +557,6 @@ class SPCClient:
                 door_idx = self._find_column(header_labels, ("porte", "door"), door_idx)
                 zone_idx = self._find_column(header_labels, ("zone",), zone_idx)
                 sect_idx = self._find_column(header_labels, ("secteur", "partition", "area"), sect_idx)
-                dps_idx = self._find_column(header_labels, ("dps", "position", "contact"), dps_idx)
                 drs_idx = self._find_column(header_labels, ("drs", "liber", "release"), drs_idx)
                 state_idx = self._find_column(header_labels, ("etat", "état", "state", "statut"), state_idx)
                 continue
@@ -558,14 +568,12 @@ class SPCClient:
             door_td = tds[door_idx] if door_idx is not None and door_idx < len(tds) else tds[0]
             zone_td = tds[zone_idx] if zone_idx is not None and zone_idx < len(tds) else (tds[1] if len(tds) > 1 else tds[0])
             sect_td = tds[sect_idx] if sect_idx is not None and sect_idx < len(tds) else (tds[2] if len(tds) > 2 else tds[-1])
-            dps_td = tds[dps_idx] if dps_idx is not None and dps_idx < len(tds) else None
             drs_td = tds[drs_idx] if drs_idx is not None and drs_idx < len(tds) else None
             state_td = tds[state_idx] if state_idx is not None and state_idx < len(tds) else (tds[-2] if len(tds) >= 2 else None)
 
             door_lbl = door_td.get_text(" ", strip=True)
             zone_lbl = zone_td.get_text(" ", strip=True)
             sect_lbl = sect_td.get_text(" ", strip=True)
-            dps_txt = self._extract_state_text(dps_td) if dps_td else ""
             drs_txt = self._extract_state_text(drs_td) if drs_td else ""
             state_txt = self._extract_state_text(state_td) if state_td else ""
 
@@ -573,11 +581,9 @@ class SPCClient:
                 "door": door_lbl,
                 "zone": zone_lbl,
                 "secteur": sect_lbl,
-                "dps_txt": dps_txt,
                 "drs_txt": drs_txt,
                 "etat_txt": state_txt,
-                "dps": self._map_zone_state(dps_txt),
-                "drs": self._map_zone_state(drs_txt),
+                "drs": self._map_door_release_state(drs_txt),
                 "etat": self._map_door_state(state_txt),
                 "id": self.door_id_from_name(door_lbl),
             }
