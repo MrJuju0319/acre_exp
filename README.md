@@ -1,8 +1,22 @@
-# 🛰️ ACRE SPC42 → MQTT
+# ACRE SPC42 → MQTT Watchdog
 
-## 🚀 Installation
+Ce dépôt propose un service `systemd` qui collecte l'état d'une centrale **ACRE SPC42** via son interface Web et le publie sur un broker **MQTT**. Il peut également piloter les secteurs, portes et zones exposés par la centrale.
 
-```
+## Sommaire
+
+1. [Installation](#installation)
+2. [Configuration](#configuration)
+3. [Mise à jour et vérifications](#mise-à-jour-et-vérifications)
+4. [Topics MQTT publiés](#topics-mqtt-publiés)
+5. [Topics MQTT de commande](#topics-mqtt-de-commande)
+6. [Service systemd](#service-systemd)
+7. [Sécurité](#sécurité)
+8. [Dépannage](#dépannage)
+9. [Désinstallation](#désinstallation)
+
+## Installation
+
+```bash
 cd /usr/local/src
 git clone https://github.com/MrJuju0319/acre_exp.git
 cd acre_exp
@@ -10,14 +24,16 @@ chmod +x install.sh
 ./install.sh --install
 ```
 
-## ⚙️ Configuration
+## Configuration
+
+Le script d'installation place un fichier `/etc/acre_exp/config.yml`. Exemple de configuration :
 
 ```yaml
 spc:
   host: "https://192.168.1.100"
   user: "Engineer"
   pin: "1111"
-  language: 253  # 253 = Français, 0 = Anglais
+  language: 253            # 253 = Français, 0 = Anglais
   session_cache_dir: "/var/lib/acre_exp"
   min_login_interval_sec: 60
 
@@ -35,18 +51,21 @@ watchdog:
   refresh_interval: 2
   controller_refresh_interval: 60
   log_changes: true
-  ```
+```
 
-> ℹ️ **Astuce :** l'adresse `spc.host` peut indifféremment utiliser `http://` ou `https://` selon la configuration de votre centrale.
+> ℹ️ L'adresse `spc.host` accepte indifféremment `http://` ou `https://` selon la configuration de la centrale.
 
-## 🔄 Mise à jour
+## Mise à jour et vérifications
+
+### Mettre à jour le service
 
 ```bash
 cd /usr/local/src/acre_exp
 chmod +x install.sh
 ./install.sh --update
 ```
-🔍 Vérifications
+
+### Vérifier le fonctionnement
 
 ```bash
 systemctl status acre-exp-watchdog.service
@@ -55,85 +74,64 @@ journalctl -u acre-exp-watchdog.service -f -n 100
 mosquitto_sub -h 127.0.0.1 -t 'acre_XXX/#' -v
 ```
 
-### Topics MQTT publiés
+## Topics MQTT publiés
 
-* `acre_XXX/zones/<id>/state` — 0 = zone normale, 1 = zone activée.
-* `acre_XXX/zones/<id>/entree` — 1 = entrée fermée, 0 = entrée ouverte/alarme.
-* `acre_XXX/secteurs/<id>/state` — 0 = MHS (désarmé), 1 = MES (totale), 2 = MES partielle A, 3 = MES partielle B, 4 = alarme.
-* `acre_XXX/doors/<id>/state` — 0 = porte normale/verrouillée, 1 = porte déverrouillée/accès libre, 4 = alarme.
-* `acre_XXX/doors/<id>/drs` — 0 = bouton de sortie relâché (fermé), 1 = bouton appuyé (ouvert).
-* `acre_XXX/etat/<section>/<Libellé>` — valeurs textuelles détaillées issues de l’onglet « Etat Centrale » (sans JSON).
-  * `acre_XXX/etat/système/Heure Système` — exemple: `Lun, 03 Nov 2025 15:54:11`.
-  * `acre_XXX/etat/alimentation/Batterie` — exemple: `OK`.
-  * `acre_XXX/etat/ethernet/Adresse IP` — exemple: `192.168.1.125`.
-  * `acre_XXX/etat/modem1/Etat Modem` — exemple: `Prêt`.
-  * `acre_XXX/etat/modem2/Etat Modem` — exemple: `Modem hors service`.
-  * `acre_XXX/etat/X-BUS/Etat du X-BUS` — exemple: `OK`.
-  * Rafraîchissement configurable (par défaut 60 s) via `watchdog.controller_refresh_interval`.
+| Topic | Description |
+| --- | --- |
+| `acre_XXX/zones/<id>/state` | 0 = zone normale, 1 = zone activée |
+| `acre_XXX/zones/<id>/entree` | 1 = entrée fermée, 0 = entrée ouverte/alarme |
+| `acre_XXX/secteurs/<id>/state` | 0 = MHS, 1 = MES totale, 2 = MES partielle A, 3 = MES partielle B, 4 = alarme |
+| `acre_XXX/doors/<id>/state` | 0 = porte normale/verrouillée, 1 = porte déverrouillée/accès libre, 4 = alarme |
+| `acre_XXX/doors/<id>/drs` | 0 = bouton de sortie relâché (fermé), 1 = bouton appuyé (ouvert) |
+| `acre_XXX/etat/<section>/<Libellé>` | Valeurs textuelles de l'onglet « État Centrale » |
 
 > ℹ️ Les topics `name`, `zone` et `secteur` sont également publiés pour chaque porte (`doors/<id>/…`).
-> ℹ️ L’identifiant `0` dans `secteurs/0/state` représente le statut global « Tous Secteurs » lu sur la page *Etat du système*.
+> ℹ️ L’identifiant `0` dans `secteurs/0/state` représente le statut global « Tous Secteurs » lu sur la page *État du système*.
 
-### Topics MQTT commandes
+## Topics MQTT de commande
 
-Publiez sur `acre_XXX/secteurs/<id>/set` pour piloter un secteur (ou `0` pour "Tous Secteurs"). Les charges utiles acceptées :
+### Secteurs
 
-| Valeur | Action envoyée |
+Publier sur `acre_XXX/secteurs/<id>/set` (ou `0` pour *Tous Secteurs*). Charges utiles acceptées :
+
+| Valeur | Action |
 | --- | --- |
-| `0`, `mhs`, `off`, `unset`, `desarm`, `stop`… | Mise Hors Service (désarmement) |
-| `1`, `mes`, `full`, `total`, `totale`, `arm`… | Mise En Service totale |
-| `2`, `part`, `partial`, `parta`, `partiel`, `partielle`… | Mise En Service partielle A |
-| `3`, `partb`, `partiel b`, `partial b`… | Mise En Service partielle B |
+| `0`, `mhs`, `off`, `unset`, `desarm`, `stop`, … | Mise Hors Service |
+| `1`, `mes`, `full`, `total`, `totale`, `arm`, … | Mise En Service totale |
+| `2`, `part`, `partial`, `parta`, `partiel`, `partielle`, … | Mise En Service partielle A |
+| `3`, `partb`, `partiel b`, `partial b`, … | Mise En Service partielle B |
 
-Publiez sur `acre_XXX/doors/<id>/set` pour piloter une porte. Les charges utiles acceptées :
+Un accusé est publié sur `acre_XXX/secteurs/<id>/command_result` (`ok:<code>` ou `error:…`). Les codes `ok` correspondent à `state` (0 à 3).
 
-| Valeur | Action envoyée |
+### Portes
+
+Publier sur `acre_XXX/doors/<id>/set`. Charges utiles acceptées :
+
+| Valeur | Action |
 | --- | --- |
-| `normal`, `reset`, `standard`… | Bouton **Normal** |
-| `verrouiller`, `lock`, `fermer`… | Bouton **Verrouiller** |
-| `deverrouiller`, `unlock`, `ouvrir`… | Bouton **Déverrouiller** |
-| `impulsion`, `pulse`, `toggle`… | Bouton **Impulsion** |
+| `normal`, `reset`, `standard`, … | Bouton **Normal** |
+| `verrouiller`, `lock`, `fermer`, … | Bouton **Verrouiller** |
+| `deverrouiller`, `unlock`, `ouvrir`, … | Bouton **Déverrouiller** |
+| `impulsion`, `pulse`, `toggle`, … | Bouton **Impulsion** |
 
-Chaque commande publie un accusé dans `acre_XXX/doors/<id>/command_result` (`ok:<action>` ou `error:…`).
+Un accusé est publié sur `acre_XXX/doors/<id>/command_result` (`ok:<action>` ou `error:…`).
 
-Chaque commande publiera un accusé dans `acre_XXX/secteurs/<id>/command_result` (`ok:<code>` ou `error:…`). Les valeurs `ok` reprennent la codification `state` (0 = MHS, 1 = MES, 2 = Partielle A, 3 = Partielle B).
+### Zones
 
-## 🧹 Désinstallation
+Publier sur `acre_XXX/zones/<id>/set`. Charges utiles acceptées :
 
-```bash
-systemctl stop acre-exp-watchdog.service
-systemctl disable acre-exp-watchdog.service
-rm -f /usr/local/bin/acre_exp_watchdog.py /usr/local/bin/acre_exp_status.py
-rm -f /etc/systemd/system/acre-exp-watchdog.service
-rm -rf /etc/acre_exp /var/lib/acre_exp /opt/spc-venv
-systemctl daemon-reload
-```
+| Valeur | Action |
+| --- | --- |
+| `inhiber`, `inhibit`, `shunt`, … | Bouton **Inhiber** |
+| `deinhiber`, `uninhibit`, `dé-inhiber`, … | Bouton **Dé-Inhiber** |
+| `isoler`, `isolate`, `isolation`, … | Bouton **Isoler** |
+| `deisoler`, `unisolate`, `dé-isoler`, … | Bouton **Dé-Isoler** |
+| `test`, `testjdb`, `soak`, … | Bouton **TestJDB** |
+| `restaurer`, `restore`, `normal`, … | Bouton **Restaurer** |
 
-## 🧰 Dépannage
+Un accusé est publié sur `acre_XXX/zones/<id>/command_result` (`ok:<action>` ou `error:…`).
 
-```
-# Corriger les fichiers Windows CRLF
-perl -0777 -i -pe 's/\x0D\x0A/\x0A/g; s/\A\xEF\xBB\xBF//' install.sh
-bash ./install.sh --update
-```
-
-```bash
-# Voir les logs systemd
-journalctl -u acre-exp-watchdog.service -n 200 --no-pager
-```
-
-```bash
-# Tester MQTT
-mosquitto_sub -v -t 'acre_XXX/#'
-```
-
-## 🔒 Sécurité
-
-```bash
-chmod 640 /etc/acre_exp/config.yml
-```
-
-## 📦 Service systemd
+## Service systemd
 
 ```ini
 [Unit]
@@ -163,4 +161,35 @@ ReadWritePaths=/var/lib/acre_exp /etc/acre_exp
 
 [Install]
 WantedBy=multi-user.target
+```
+
+## Sécurité
+
+```bash
+chmod 640 /etc/acre_exp/config.yml
+```
+
+## Dépannage
+
+```bash
+# Corriger les fichiers Windows CRLF
+perl -0777 -i -pe 's/\x0D\x0A/\x0A/g; s/\A\xEF\xBB\xBF//' install.sh
+bash ./install.sh --update
+
+# Voir les logs systemd
+journalctl -u acre-exp-watchdog.service -n 200 --no-pager
+
+# Tester MQTT
+mosquitto_sub -v -t 'acre_XXX/#'
+```
+
+## Désinstallation
+
+```bash
+systemctl stop acre-exp-watchdog.service
+systemctl disable acre-exp-watchdog.service
+rm -f /usr/local/bin/acre_exp_watchdog.py /usr/local/bin/acre_exp_status.py
+rm -f /etc/systemd/system/acre-exp-watchdog.service
+rm -rf /etc/acre_exp /var/lib/acre_exp /opt/spc-venv
+systemctl daemon-reload
 ```
