@@ -457,6 +457,208 @@ class SPCClient(StatusSPCClient):
         label = area_label or area_num or suffix
         return {"ok": True, "area_id": area_num or "0", "mode": mode, "button": button, "label": label}
 
+    def _resolve_zone_number(self, zone_id: str):
+        if zone_id is None:
+            raise ValueError("identifiant de zone manquant")
+
+        raw = str(zone_id).strip()
+        if not raw:
+            raise ValueError("identifiant de zone vide")
+
+        norm = self._normalize_command(raw)
+
+        candidate_numbers = []
+        if raw.isdigit():
+            candidate_numbers.append(str(int(raw)))
+        if norm.startswith("zone") and norm[4:].isdigit():
+            candidate_numbers.append(str(int(norm[4:])))
+        if norm.startswith("z") and norm[1:].isdigit():
+            candidate_numbers.append(str(int(norm[1:])))
+
+        fallback_label = ""
+        if candidate_numbers:
+            fallback_label = f"Zone {candidate_numbers[0]}"
+
+        try:
+            data = self.fetch()
+        except Exception:
+            data = {"zones": []}
+
+        for zone in data.get("zones", []):
+            zid = str(zone.get("id") or self.zone_id_from_name(zone) or "").strip()
+            if not zid:
+                continue
+            zid_norm = zid if not zid.isdigit() else str(int(zid))
+            zone_label = self.zone_name(zone) or zid_norm or fallback_label or f"Zone {zid_norm or zid}"
+            zone_label_no_num = re.sub(r"^\s*\d+\s*", "", zone_label).strip()
+            sector_label = self.zone_sector(zone)
+            sector_label_no_num = re.sub(r"^\s*\d+\s*", "", sector_label or "").strip()
+
+            candidates = [
+                zid,
+                zid_norm,
+                self.zone_name(zone),
+                zone_label_no_num,
+                sector_label,
+                sector_label_no_num,
+                self.zone_id_from_name(zone),
+            ]
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                candidate = str(candidate).strip()
+                cand_norm = self._normalize_command(candidate)
+                if candidate == raw or (cand_norm and cand_norm == norm):
+                    return zid_norm or zid, zone_label
+
+            if zid_norm and zid_norm in candidate_numbers:
+                return zid_norm, zone_label
+
+        if candidate_numbers:
+            return candidate_numbers[0], fallback_label or f"Zone {candidate_numbers[0]}"
+
+        raise ValueError(f"zone '{raw}' introuvable")
+
+    def _zone_command_to_button(self, zone_num: str, command: str):
+        norm = self._normalize_command(command)
+        if not norm:
+            raise ValueError("commande vide")
+
+        mapping = {
+            "inhibit": {
+                "tokens": {"inhibit", "inhib", "inhiber", "bypass", "shunt"},
+                "button": "inhibit",
+                "value": "Inhiber",
+                "label": "Inhiber",
+            },
+            "uninhibit": {
+                "tokens": {
+                    "de-inhiber",
+                    "de inhiber",
+                    "deinhiber",
+                    "desinhiber",
+                    "de-inhibit",
+                    "de inhibit",
+                    "des-inhiber",
+                    "uninhibit",
+                    "uninhiber",
+                    "retablir inhib",
+                    "retablir inhiber",
+                },
+                "button": "uninhibit",
+                "value": "Dé-Inhiber",
+                "label": "Dé-Inhiber",
+            },
+            "isolate": {
+                "tokens": {"isoler", "isolate", "isolation", "isol"},
+                "button": "isolate",
+                "value": "Isoler",
+                "label": "Isoler",
+            },
+            "unisolate": {
+                "tokens": {
+                    "de-isoler",
+                    "de isoler",
+                    "deisoler",
+                    "desisoler",
+                    "des-isoler",
+                    "unisoler",
+                    "unisolate",
+                    "de-isolate",
+                    "de isolate",
+                    "retablir isol",
+                    "retablir isoler",
+                },
+                "button": "unisolate",
+                "value": "Dé-Isoler",
+                "label": "Dé-Isoler",
+            },
+            "soak": {
+                "tokens": {
+                    "testjdb",
+                    "test jdb",
+                    "test-jdb",
+                    "test",
+                    "jdb",
+                    "soak",
+                    "essai",
+                    "essai jdb",
+                    "mode test",
+                },
+                "button": "soak",
+                "value": "TestJDB",
+                "label": "Test JDB",
+            },
+            "restore": {
+                "tokens": {
+                    "restaurer",
+                    "restore",
+                    "reset",
+                    "normal",
+                    "retablir",
+                    "normaliser",
+                    "fin test",
+                    "arreter test",
+                    "stop test",
+                    "stoptest",
+                },
+                "button": "restore",
+                "value": "Restaurer",
+                "label": "Restaurer",
+            },
+        }
+
+        for action, info in mapping.items():
+            if norm in info["tokens"]:
+                button = f"{info['button']}{zone_num}"
+                return button, info["value"], action, info["label"]
+
+        raise ValueError(f"commande '{command}' inconnue")
+
+    def send_zone_command(self, zone_id: str, command: str):
+        zone_num, zone_label = self._resolve_zone_number(zone_id)
+        button, value, action, action_label = self._zone_command_to_button(zone_num, command)
+
+        sid = self.get_or_login()
+        if not sid:
+            raise RuntimeError("Impossible d’obtenir une session")
+
+        def _post_action(current_sid):
+            url = (
+                f"{self.host}/secure.htm?session={current_sid}&page=status_zones"
+                f"&action=update&zone={zone_num}"
+            )
+            referer = f"{self.host}/secure.htm?session={current_sid}&page=status_zones"
+            data = {button: value}
+            return self._post(url, data=data, referer=referer)
+
+        try:
+            r = _post_action(sid)
+        except Exception as exc:
+            logging.debug("POST commande zone échoué, tentative relogin", exc_info=True)
+            sid = self._do_login()
+            if not sid:
+                raise RuntimeError(f"Impossible d’envoyer la commande zone ({exc})")
+            r = _post_action(sid)
+
+        if self._is_login_response(getattr(r, "text", ""), getattr(r, "url", ""), True):
+            sid = self._do_login()
+            if not sid:
+                raise RuntimeError("Session expirée, relogin impossible")
+            r = _post_action(sid)
+            if self._is_login_response(getattr(r, "text", ""), getattr(r, "url", ""), True):
+                raise RuntimeError("Commande zone refusée (retour page login)")
+
+        label = zone_label or f"Zone {zone_num}"
+        return {
+            "ok": True,
+            "zone_id": zone_num,
+            "button": button,
+            "action": action,
+            "action_label": action_label,
+            "label": label,
+        }
+
     def _resolve_door_number(self, door_id: str):
         if door_id is None:
             raise ValueError("identifiant de porte manquant")
@@ -598,6 +800,7 @@ class MQ:
         self.command_queue: "queue.Queue" = queue.Queue()
         self.command_topics = [
             self._topic("secteurs/+/set") or "secteurs/+/set",
+            self._topic("zones/+/set") or "zones/+/set",
             self._topic("doors/+/set") or "doors/+/set",
         ]
 
@@ -682,6 +885,8 @@ class MQ:
         category = sub[0]
         if category == "secteurs":
             cmd_type = "area"
+        elif category == "zones":
+            cmd_type = "zone"
         elif category == "doors":
             cmd_type = "door"
         else:
@@ -779,6 +984,7 @@ def main() -> None:
     last_a: Dict[str, int] = {}
     last_door_state: Dict[str, int] = {}
     last_door_drs: Dict[str, int] = {}
+    zone_names: Dict[str, str] = {}
     door_names: Dict[str, str] = {}
     last_controller: Dict[str, str] = {}
     cleared_legacy_controller_topics: Set[str] = set()
@@ -878,6 +1084,7 @@ def main() -> None:
         zname = SPCClient.zone_name(z)
         if not zid or not zname:
             continue
+        zone_names[zid] = zname
         mq.pub(f"zones/{zid}/name", zname)
         mq.pub(f"zones/{zid}/secteur", SPCClient.zone_sector(z))
         b = SPCClient.zone_bin(z)
@@ -948,6 +1155,19 @@ def main() -> None:
             return str(int(tok))
         return tok
 
+    def _normalize_zone_token(token: str) -> str:
+        tok = (token or "").strip()
+        if not tok:
+            return ""
+        low = tok.lower()
+        if low.startswith("zone") and low[4:].isdigit():
+            return str(int(low[4:]))
+        if low.startswith("z") and low[1:].isdigit():
+            return str(int(low[1:]))
+        if tok.isdigit():
+            return str(int(tok))
+        return tok
+
     def process_commands() -> bool:
         handled = False
         while True:
@@ -957,6 +1177,30 @@ def main() -> None:
             handled = True
             cmd_type, target, payload, _topic = item
             tick_cmd = time.strftime("%H:%M:%S")
+
+            if cmd_type == "zone":
+                zone_token = target
+                ack_id = _normalize_zone_token(zone_token) or "unknown"
+                label = zone_names.get(ack_id, ack_id)
+                try:
+                    result = spc.send_zone_command(zone_token, payload)
+                    ack_id = str(result.get("zone_id") or ack_id or "unknown").strip()
+                    label = result.get("label") or zone_names.get(ack_id, ack_id)
+                    if ack_id:
+                        zone_names[ack_id] = label
+                    action_code = str(result.get("action") or "").strip()
+                    action_label = result.get("action_label") or action_code or payload
+                    status_payload = f"ok:{action_code}" if action_code else "ok"
+                    ack_topic_id = ack_id or "unknown"
+                    mq.pub(f"zones/{ack_topic_id}/command_result", status_payload)
+                    if log_changes:
+                        print(f"[{tick_cmd}] ✅ Commande zone '{label}' → {action_label}")
+                except Exception as err:
+                    ack_topic_id = ack_id or "unknown"
+                    mq.pub(f"zones/{ack_topic_id}/command_result", f"error:{err}")
+                    if log_changes:
+                        print(f"[{tick_cmd}] ❌ Commande zone '{label}' échouée: {err}")
+                continue
 
             if cmd_type == "area":
                 area_token = target
@@ -1027,6 +1271,7 @@ def main() -> None:
             zname = SPCClient.zone_name(z)
             if not zid or not zname:
                 continue
+            zone_names[zid] = zname
             b = SPCClient.zone_bin(z)
             if b not in (0, 1):
                 continue
