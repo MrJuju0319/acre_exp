@@ -624,6 +624,88 @@ class SPCClient:
         return doors
 
     @staticmethod
+    def _map_output_state(state_token: str, icon_src: str) -> int:
+        norm = SPCClient._normalize_label(state_token)
+        icon = (icon_src or "").strip().lower()
+        if icon:
+            if "_on" in icon or "-on" in icon or "output_on" in icon:
+                return 1
+            if "_off" in icon or "-off" in icon or "output_off" in icon:
+                return 0
+        if norm:
+            if any(k in norm for k in ("on", "marche", "active", "actif", "ouvert")):
+                return 1
+            if any(k in norm for k in ("off", "arret", "arr", "stop", "inactive", "ferme")):
+                return 0
+        return -1
+
+    def parse_outputs(self, html):
+        soup = BeautifulSoup(html, "html.parser")
+        outputs = []
+
+        table = soup.find("table", {"class": "gridtable"})
+        if not table:
+            return outputs
+
+        rows = table.find_all("tr")
+        if not rows or len(rows) <= 1:
+            return outputs
+
+        for row in rows[1:]:
+            cells = row.find_all("td")
+            if len(cells) < 3:
+                continue
+
+            raw_id = cells[0].get_text(" ", strip=True)
+            if not raw_id:
+                continue
+            m = re.search(r"\d+", raw_id)
+            if m:
+                oid = str(int(m.group(0)))
+            else:
+                oid = raw_id.strip()
+
+            label_cell = cells[1]
+            label_text = label_cell.get_text(" ", strip=True)
+            state_token = ""
+            name = label_text
+            if ":" in label_text:
+                parts = label_text.split(":", 1)
+                state_token = parts[0].strip()
+                name = parts[1].strip()
+            icon = label_cell.find("img")
+            icon_src = icon.get("src", "") if icon else ""
+            state = self._map_output_state(state_token, icon_src)
+
+            action_cell = cells[2]
+            button_on = None
+            button_off = None
+            for button in action_cell.find_all("input"):
+                btn_name = str(button.get("name", "")).strip()
+                btn_value = str(button.get("value", "")).strip()
+                if not btn_name:
+                    continue
+                btn_info = {"name": btn_name, "value": btn_value}
+                low_name = btn_name.lower()
+                if low_name.startswith("on") and button_on is None:
+                    button_on = btn_info
+                elif low_name.startswith("off") and button_off is None:
+                    button_off = btn_info
+
+            outputs.append({
+                "id": oid,
+                "interaction": raw_id,
+                "name": name,
+                "state": state,
+                "state_txt": state_token or label_text,
+                "icon": icon_src,
+                "button_on": button_on or {},
+                "button_off": button_off or {},
+            })
+
+        return outputs
+
+    @staticmethod
     def _slug(text: str) -> str:
         norm = SPCClient._normalize_label(text)
         if not norm:
@@ -764,9 +846,22 @@ class SPCClient:
                 doors = self.parse_doors(r_d.text)
                 logging.debug("doors retry length: %d — parsed: %d", len(r_d.text), len(doors))
 
+        sid, r_o = _fetch("status_mg", referer_page="status_outputs_menu")
+        logging.debug("Requesting outputs from: %s (len=%d)", r_o.url, len(r_o.text))
+        outputs = self.parse_outputs(r_o.text)
+        if len(outputs) == 0 and self._is_login_response(r_o.text, getattr(r_o, "url", ""), True):
+            logging.debug("Outputs parse empty + looks like login — re-login once")
+            new_sid = self._do_login()
+            if new_sid:
+                sid = new_sid
+                r_o = self._get(f"{self.host}/secure.htm?session={sid}&page=status_mg",
+                                 referer=f"{self.host}/secure.htm?session={sid}&page=status_outputs_menu")
+                outputs = self.parse_outputs(r_o.text)
+                logging.debug("outputs retry length: %d — parsed: %d", len(r_o.text), len(outputs))
+
         self._save_cookies()
         self._save_session_cache(sid)
-        return {"zones": zones, "areas": areas, "doors": doors, "controller": controller}
+        return {"zones": zones, "areas": areas, "doors": doors, "outputs": outputs, "controller": controller}
 
 def main():
     parser = argparse.ArgumentParser()

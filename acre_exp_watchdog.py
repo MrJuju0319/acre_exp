@@ -299,6 +299,47 @@ class SPCClient(StatusSPCClient):
         return StatusSPCClient._map_door_state(txt)
 
     @staticmethod
+    def output_id(output) -> str:
+        if isinstance(output, dict):
+            oid = output.get("id") or output.get("interaction")
+            if oid is not None:
+                return str(oid).strip()
+        return str(output or "").strip()
+
+    @staticmethod
+    def output_name(output) -> str:
+        if isinstance(output, dict):
+            return str(output.get("name") or "").strip()
+        return str(output or "").strip()
+
+    @staticmethod
+    def output_state(output) -> int:
+        if isinstance(output, dict):
+            state = output.get("state")
+            if isinstance(state, int):
+                return state
+        return -1
+
+    @staticmethod
+    def output_state_txt(output) -> str:
+        if isinstance(output, dict):
+            return str(output.get("state_txt") or "").strip()
+        return str(output or "").strip()
+
+    @staticmethod
+    def output_button(output, kind: str) -> Dict[str, str]:
+        if not isinstance(output, dict):
+            return {}
+        key = "button_on" if kind == "on" else "button_off" if kind == "off" else kind
+        button = output.get(key)
+        if isinstance(button, dict):
+            name = str(button.get("name") or "").strip()
+            value = str(button.get("value") or "").strip()
+            if name:
+                return {"name": name, "value": value}
+        return {}
+
+    @staticmethod
     def area_id(area) -> str:
         if isinstance(area, dict):
             sid = area.get("sid")
@@ -339,9 +380,15 @@ class SPCClient(StatusSPCClient):
                 if not d.get("id"):
                     d["id"] = self.door_id(d)
 
+        outputs = data.get("outputs", [])
+        for o in outputs:
+            if isinstance(o, dict):
+                if not o.get("id"):
+                    o["id"] = self.output_id(o)
+
         controller = data.get("controller", [])
 
-        return {"zones": zones, "areas": areas, "doors": doors, "controller": controller}
+        return {"zones": zones, "areas": areas, "doors": doors, "outputs": outputs, "controller": controller}
 
     @staticmethod
     def _normalize_command(cmd: str) -> str:
@@ -802,6 +849,7 @@ class MQ:
             self._topic("secteurs/+/set") or "secteurs/+/set",
             self._topic("zones/+/set") or "zones/+/set",
             self._topic("doors/+/set") or "doors/+/set",
+            self._topic("outputs/+/set") or "outputs/+/set",
         ]
 
         client_kwargs = {
@@ -889,6 +937,8 @@ class MQ:
             cmd_type = "zone"
         elif category == "doors":
             cmd_type = "door"
+        elif category == "outputs":
+            cmd_type = "output"
         else:
             return
         try:
@@ -984,8 +1034,11 @@ def main() -> None:
     last_a: Dict[str, int] = {}
     last_door_state: Dict[str, int] = {}
     last_door_drs: Dict[str, int] = {}
+    last_output_state: Dict[str, int] = {}
+    last_output_text: Dict[str, str] = {}
     zone_names: Dict[str, str] = {}
     door_names: Dict[str, str] = {}
+    output_names: Dict[str, str] = {}
     last_controller: Dict[str, str] = {}
     cleared_legacy_controller_topics: Set[str] = set()
     area_names: Dict[str, str] = {"0": "Tous Secteurs"}
@@ -1129,6 +1182,24 @@ def main() -> None:
             last_door_drs[did] = drs
             mq.pub(f"doors/{did}/drs", drs)
 
+    for output in snap.get("outputs", []):
+        oid = SPCClient.output_id(output)
+        oname = SPCClient.output_name(output)
+        if not oid:
+            continue
+        label = oname or output_names.get(oid) or f"Sortie {oid}"
+        if oname:
+            mq.pub(f"outputs/{oid}/name", oname)
+        output_names[oid] = label
+        state = SPCClient.output_state(output)
+        if isinstance(state, int) and state >= 0:
+            last_output_state[oid] = state
+            mq.pub(f"outputs/{oid}/state", state)
+        state_txt = SPCClient.output_state_txt(output)
+        if state_txt:
+            last_output_text[oid] = state_txt
+            mq.pub(f"outputs/{oid}/state_txt", state_txt)
+
     publish_controller_sections(snap.get("controller", []))
     next_controller_publish = time.monotonic() + controller_interval
 
@@ -1164,6 +1235,19 @@ def main() -> None:
             return str(int(low[4:]))
         if low.startswith("z") and low[1:].isdigit():
             return str(int(low[1:]))
+        if tok.isdigit():
+            return str(int(tok))
+        return tok
+
+    def _normalize_output_token(token: str) -> str:
+        tok = (token or "").strip()
+        if not tok:
+            return ""
+        low = tok.lower()
+        if low.startswith("output") and low[6:].isdigit():
+            return str(int(low[6:]))
+        if low.startswith("out") and low[3:].isdigit():
+            return str(int(low[3:]))
         if tok.isdigit():
             return str(int(tok))
         return tok
@@ -1250,9 +1334,156 @@ def main() -> None:
                         print(f"[{tick_cmd}] ❌ Commande porte '{label}' échouée: {err}")
                 continue
 
+            if cmd_type == "output":
+                output_token = target
+                ack_id = _normalize_output_token(output_token) or "unknown"
+                label = output_names.get(ack_id, ack_id)
+                try:
+                    result = spc.send_output_command(output_token, payload)
+                    ack_id = str(result.get("output_id") or ack_id or "unknown")
+                    label = result.get("label") or output_names.get(ack_id, ack_id)
+                    if ack_id:
+                        output_names[ack_id] = label
+                    action_code = str(result.get("action") or "").strip()
+                    action_label = result.get("action_label") or action_code or payload
+                    status_payload = f"ok:{action_code}" if action_code else "ok"
+                    ack_topic_id = ack_id or "unknown"
+                    mq.pub(f"outputs/{ack_topic_id}/command_result", status_payload)
+                    if log_changes:
+                        print(f"[{tick_cmd}] ✅ Commande sortie '{label}' → {action_label}")
+                except Exception as err:
+                    ack_topic_id = ack_id or "unknown"
+                    mq.pub(f"outputs/{ack_topic_id}/command_result", f"error:{err}")
+                    if log_changes:
+                        print(f"[{tick_cmd}] ❌ Commande sortie '{label}' échouée: {err}")
+                continue
+
             if log_changes:
                 print(f"[{tick_cmd}] ⚠️ Commande inconnue ignorée: {item}")
         return handled
+
+    def _resolve_output_number(self, output_id: str):
+        if output_id is None:
+            raise ValueError("identifiant de sortie manquant")
+
+        raw = str(output_id).strip()
+        if not raw:
+            raise ValueError("identifiant de sortie vide")
+
+        norm = self._normalize_command(raw)
+        candidates = []
+        if raw.isdigit():
+            candidates.append(str(int(raw)))
+        if norm.startswith("output") and norm[6:].isdigit():
+            candidates.append(str(int(norm[6:])))
+        if norm.startswith("out") and norm[3:].isdigit():
+            candidates.append(str(int(norm[3:])))
+
+        try:
+            data = self.fetch()
+        except Exception:
+            data = {"outputs": []}
+
+        for output in data.get("outputs", []):
+            oid = self.output_id(output)
+            name = self.output_name(output) or oid
+            interaction = str(output.get("interaction") or "").strip()
+
+            possible = [oid, name, interaction]
+            for cand in possible:
+                cand = str(cand or "").strip()
+                if not cand:
+                    continue
+                cand_norm = self._normalize_command(cand)
+                if cand == raw or (cand_norm and cand_norm == norm):
+                    resolved = oid or interaction or raw
+                    label = name or interaction or resolved
+                    return resolved, label, output
+
+            if oid and oid in candidates:
+                label = name or interaction or oid
+                return oid, label, output
+
+        if candidates:
+            raise ValueError(f"sortie '{raw}' introuvable")
+
+        raise ValueError(f"sortie '{raw}' introuvable")
+
+    def _output_command_to_button(self, output_data: dict, command: str):
+        norm = self._normalize_command(command)
+        if not norm:
+            raise ValueError("commande vide")
+
+        mapping = {
+            "on": {
+                "tokens": {"on", "1", "true", "marche", "start", "actif", "active", "activate", "allume", "allumer", "ouvrir"},
+                "button_key": "on",
+                "label": "ON",
+            },
+            "off": {
+                "tokens": {"off", "0", "false", "stop", "arrete", "arret", "arr", "eteindre", "eteint", "inactive", "close"},
+                "button_key": "off",
+                "label": "OFF",
+            },
+        }
+
+        for action, info in mapping.items():
+            if norm in info["tokens"]:
+                button = self.output_button(output_data, info["button_key"])
+                name = button.get("name")
+                value = button.get("value") or (info["label"].strip() if info.get("label") else "1")
+                if not name:
+                    raise ValueError("bouton de commande sortie introuvable")
+                return name, value, action, info.get("label") or action.upper()
+
+        raise ValueError(f"commande '{command}' inconnue")
+
+    def send_output_command(self, output_id: str, command: str):
+        output_num, output_label, output_data = self._resolve_output_number(output_id)
+        if not output_data:
+            raise RuntimeError("Informations sortie indisponibles")
+        button, value, action, action_label = self._output_command_to_button(output_data, command)
+
+        sid = self.get_or_login()
+        if not sid:
+            raise RuntimeError("Impossible d’obtenir une session")
+
+        def _post_action(current_sid):
+            url = (
+                f"{self.host}/secure.htm?session={current_sid}&page=status_mg"
+                "&action=update"
+            )
+            referer = f"{self.host}/secure.htm?session={current_sid}&page=status_mg"
+            payload = value if value is not None else "1"
+            data = {button: payload}
+            return self._post(url, data=data, referer=referer)
+
+        try:
+            r = _post_action(sid)
+        except Exception as exc:
+            logging.debug("POST commande sortie échoué, tentative relogin", exc_info=True)
+            sid = self._do_login()
+            if not sid:
+                raise RuntimeError(f"Impossible d’envoyer la commande sortie ({exc})")
+            r = _post_action(sid)
+
+        if self._is_login_response(getattr(r, "text", ""), getattr(r, "url", ""), True):
+            sid = self._do_login()
+            if not sid:
+                raise RuntimeError("Session expirée, relogin impossible")
+            r = _post_action(sid)
+            if self._is_login_response(getattr(r, "text", ""), getattr(r, "url", ""), True):
+                raise RuntimeError("Commande sortie refusée (retour page login)")
+
+        label = output_label or f"Sortie {output_num}"
+        return {
+            "ok": True,
+            "output_id": output_num,
+            "button": button,
+            "action": action,
+            "action_label": action_label,
+            "label": label,
+        }
 
     while running:
         commands_before = process_commands()
@@ -1360,6 +1591,38 @@ def main() -> None:
                             1: "ouverte",
                         }.get(drs, str(drs))
                         print(f"[{tick}] 🟤 Libération porte '{dname}' → {drs_txt}")
+
+        for output in data.get("outputs", []):
+            oid = SPCClient.output_id(output)
+            if not oid:
+                continue
+            oname = SPCClient.output_name(output)
+            current_label = output_names.get(oid, "")
+            if oname and oname != current_label:
+                mq.pub(f"outputs/{oid}/name", oname)
+                output_names[oid] = oname
+            elif not current_label:
+                output_names[oid] = oname or f"Sortie {oid}"
+            label = output_names.get(oid) or oname or oid
+
+            state = SPCClient.output_state(output)
+            if isinstance(state, int) and state >= 0:
+                old_state = last_output_state.get(oid)
+                if old_state is None or state != old_state:
+                    mq.pub(f"outputs/{oid}/state", state)
+                    last_output_state[oid] = state
+                    if log_changes:
+                        state_txt = {0: "off", 1: "on"}.get(state, str(state))
+                        print(f"[{tick}] 🟥 Sortie '{label}' → {state_txt}")
+
+            state_txt = SPCClient.output_state_txt(output)
+            if state_txt:
+                old_txt = last_output_text.get(oid)
+                if old_txt != state_txt:
+                    mq.pub(f"outputs/{oid}/state_txt", state_txt)
+                    last_output_text[oid] = state_txt
+                    if log_changes:
+                        print(f"[{tick}] ⬜ Sortie '{label}' état texte → {state_txt}")
 
         if not commands_before and not commands_after:
             time.sleep(interval)

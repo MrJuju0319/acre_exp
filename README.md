@@ -84,6 +84,8 @@ mosquitto_sub -h 127.0.0.1 -t 'acre_XXX/#' -v
 | `acre_XXX/doors/<id>/state` | 0 = porte normale/verrouillée, 1 = porte déverrouillée/accès libre, 4 = alarme |
 | `acre_XXX/doors/<id>/drs` | 0 = bouton de sortie relâché (fermé), 1 = bouton appuyé (ouvert) |
 | `acre_XXX/etat/<section>/<Libellé>` | Valeurs textuelles de l'onglet « État Centrale » |
+| `acre_XXX/outputs/<id>/state` | 0 = sortie à l'arrêt, 1 = sortie activée |
+| `acre_XXX/outputs/<id>/state_txt` | Texte brut (« On », « Off », …) affiché sur la page Intéraction Logique |
 
 > ℹ️ Les topics `name`, `zone` et `secteur` sont également publiés pour chaque porte (`doors/<id>/…`).
 > ℹ️ L’identifiant `0` dans `secteurs/0/state` représente le statut global « Tous Secteurs » lu sur la page *État du système*.
@@ -115,6 +117,17 @@ Publier sur `acre_XXX/doors/<id>/set`. Charges utiles acceptées :
 | `impulsion`, `pulse`, `toggle`, … | Bouton **Impulsion** |
 
 Un accusé est publié sur `acre_XXX/doors/<id>/command_result` (`ok:<action>` ou `error:…`).
+
+### Sorties
+
+Publier sur `acre_XXX/outputs/<id>/set`. Charges utiles acceptées :
+
+| Valeur | Action |
+| --- | --- |
+| `on`, `1`, `true`, `marche`, `start`, … | Bouton **ON** |
+| `off`, `0`, `false`, `stop`, `arret`, `arrêt`, … | Bouton **Off** |
+
+Un accusé est publié sur `acre_XXX/outputs/<id>/command_result` (`ok:<action>` ou `error:…`).
 
 ### Zones
 
