@@ -7,7 +7,7 @@ import yaml
 import requests
 from bs4 import BeautifulSoup
 from http.cookiejar import MozillaCookieJar
-from typing import Dict, Set
+from typing import Dict, Set, Optional
 
 from acre_exp_status import SPCClient as StatusSPCClient
 
@@ -30,6 +30,37 @@ def load_cfg(path: str):
 def ensure_dir(p):
     import pathlib
     pathlib.Path(p).mkdir(parents=True, exist_ok=True)
+
+
+def _coerce_bool(value, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if not normalized:
+            return default
+        true_tokens = {"1", "true", "yes", "y", "on", "oui"}
+        false_tokens = {"0", "false", "no", "n", "off", "non"}
+        if normalized in true_tokens:
+            return True
+        if normalized in false_tokens:
+            return False
+    return default
+
+
+def _coerce_float(value, default: float, min_value: float) -> float:
+    try:
+        result = float(value)
+    except Exception:
+        result = default
+    if result < min_value:
+        return min_value
+    return result
+
 
 class SPCClient(StatusSPCClient):
     def __init__(self, cfg: dict, debug: bool = False):
@@ -804,7 +835,7 @@ class SPCClient(StatusSPCClient):
         }
 
 class MQ:
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, control_flags: Optional[Dict[str, bool]] = None):
         m = cfg.get("mqtt", {})
         self.host = m.get("host", "127.0.0.1")
         self.port = int(m.get("port", 1883))
@@ -817,13 +848,18 @@ class MQ:
         proto = str(m.get("protocol", "v311")).lower()
         self.protocol = mqtt.MQTTv5 if proto in ("v5", "mqttv5", "5") else mqtt.MQTTv311
         self.base_parts = [p for p in self.base.split("/") if p]
+        defaults = {"secteurs": True, "zones": True, "doors": True, "outputs": True}
+        control_flags = control_flags or {}
+        self.control_enabled = {}
+        for key, default in defaults.items():
+            self.control_enabled[key] = _coerce_bool(control_flags.get(key), default)
+
         self.command_queue: "queue.Queue" = queue.Queue()
-        self.command_topics = [
-            self._topic("secteurs/+/set") or "secteurs/+/set",
-            self._topic("zones/+/set") or "zones/+/set",
-            self._topic("doors/+/set") or "doors/+/set",
-            self._topic("outputs/+/set") or "outputs/+/set",
-        ]
+        self.command_topics = []
+        for key in ("secteurs", "zones", "doors", "outputs"):
+            if self.control_enabled.get(key, True):
+                topic = self._topic(f"{key}/+/set") or f"{key}/+/set"
+                self.command_topics.append(topic)
 
         client_kwargs = {
             "client_id": self.client_id,
@@ -914,6 +950,11 @@ class MQ:
             cmd_type = "output"
         else:
             return
+        if not self.control_enabled.get(category, True):
+            target = sub[1]
+            print(f"[MQTT] Commande ignorée ({category} désactivé) pour {target}")
+            self.pub(f"{category}/{target}/command_result", "error:control-disabled")
+            return
         try:
             payload = msg.payload.decode("utf-8", errors="ignore").strip()
         except Exception:
@@ -973,24 +1014,29 @@ def main() -> None:
 
     cfg = load_cfg(args.config)
     wd  = cfg.get("watchdog", {})
-    try:
-        interval = int(wd.get("refresh_interval", 2))
-    except Exception:
-        interval = 2
-    if interval < 1:
-        interval = 1
+    interval = _coerce_float(wd.get("refresh_interval", 2), 2.0, 0.2)
 
-    try:
-        controller_interval = int(wd.get("controller_refresh_interval", 60))
-    except Exception:
-        controller_interval = 60
-    if controller_interval < 1:
-        controller_interval = 1
+    controller_interval = _coerce_float(
+        wd.get("controller_refresh_interval", 60),
+        60.0,
+        1.0,
+    )
 
     log_changes = bool(wd.get("log_changes", True))
 
     spc = SPCClient(cfg, debug=args.debug)
-    mq  = MQ(cfg)
+    def _build_feature_flags(section):
+        if not isinstance(section, dict):
+            section = {}
+        flags = {}
+        for key in ("zones", "secteurs", "doors", "outputs"):
+            flags[key] = _coerce_bool(section.get(key), True)
+        return flags
+
+    info_flags = _build_feature_flags(wd.get("information"))
+    control_flags = _build_feature_flags(wd.get("controle"))
+
+    mq  = MQ(cfg, control_flags=control_flags)
 
     print(
         "[SPC→MQTT] Démarrage (refresh={zones}s, controller_refresh={ctrl}s) — Broker {host}:{port}".format(
@@ -1000,6 +1046,14 @@ def main() -> None:
             port=mq.port,
         )
     )
+    info_summary = ", ".join(
+        f"{k}={'ON' if info_flags.get(k) else 'OFF'}" for k in ("zones", "secteurs", "doors", "outputs")
+    )
+    control_summary = ", ".join(
+        f"{k}={'ON' if control_flags.get(k) else 'OFF'}" for k in ("zones", "secteurs", "doors", "outputs")
+    )
+    print(f"[Config] Information → {info_summary}")
+    print(f"[Config] Contrôle → {control_summary}")
     mq.connect()
 
     last_z: Dict[str, int] = {}
@@ -1111,6 +1165,8 @@ def main() -> None:
         if not zid or not zname:
             continue
         zone_names[zid] = zname
+        if not info_flags.get("zones", True):
+            continue
         mq.pub(f"zones/{zid}/name", zname)
         mq.pub(f"zones/{zid}/secteur", SPCClient.zone_sector(z))
         b = SPCClient.zone_bin(z)
@@ -1127,9 +1183,10 @@ def main() -> None:
         sid = SPCClient.area_id(a)
         if not sid:
             continue
-        mq.pub(f"secteurs/{sid}/name", a.get("nom", ""))
+        if info_flags.get("secteurs", True):
+            mq.pub(f"secteurs/{sid}/name", a.get("nom", ""))
         s = SPCClient.area_num(a)
-        if s >= 0:
+        if s >= 0 and info_flags.get("secteurs", True):
             last_a[sid] = s
             mq.pub(f"secteurs/{sid}/state", s)
 
@@ -1138,20 +1195,21 @@ def main() -> None:
         dname = SPCClient.door_name(d)
         if not did or not dname:
             continue
-        mq.pub(f"doors/{did}/name", dname)
         zone_lbl = SPCClient.door_zone(d)
-        if zone_lbl:
-            mq.pub(f"doors/{did}/zone", zone_lbl)
         secteur_lbl = SPCClient.door_sector(d)
-        if secteur_lbl:
-            mq.pub(f"doors/{did}/secteur", secteur_lbl)
         door_names[did] = zone_lbl or secteur_lbl or dname
+        if info_flags.get("doors", True):
+            mq.pub(f"doors/{did}/name", dname)
+            if zone_lbl:
+                mq.pub(f"doors/{did}/zone", zone_lbl)
+            if secteur_lbl:
+                mq.pub(f"doors/{did}/secteur", secteur_lbl)
         state = SPCClient.door_state(d)
-        if state >= 0:
+        if state >= 0 and info_flags.get("doors", True):
             last_door_state[did] = state
             mq.pub(f"doors/{did}/state", state)
         drs = SPCClient.door_drs(d)
-        if drs >= 0:
+        if drs >= 0 and info_flags.get("doors", True):
             last_door_drs[did] = drs
             mq.pub(f"doors/{did}/drs", drs)
 
@@ -1160,10 +1218,11 @@ def main() -> None:
         oname = SPCClient.output_name(output)
         if not oid:
             continue
-        label = oname or output_names.get(oid) or f"Sortie {oid}"
+        output_names[oid] = oname or output_names.get(oid) or f"Sortie {oid}"
+        if not info_flags.get("outputs", True):
+            continue
         if oname:
             mq.pub(f"outputs/{oid}/name", oname)
-        output_names[oid] = label
         state = SPCClient.output_state(output)
         if isinstance(state, int) and state >= 0:
             last_output_state[oid] = state
@@ -1354,15 +1413,16 @@ def main() -> None:
             if not zid or not zname:
                 continue
             zone_names[zid] = zname
-            b = SPCClient.zone_bin(z)
-            if b not in (0, 1):
+            if not info_flags.get("zones", True):
                 continue
-            old = last_z.get(zid)
-            if old is None or b != old:
-                mq.pub(f"zones/{zid}/state", b)
-                last_z[zid] = b
-                if log_changes:
-                    print(f"[{tick}] 🟡 Zone '{zname}' → {b}")
+            b = SPCClient.zone_bin(z)
+            if b in (0, 1):
+                old = last_z.get(zid)
+                if old is None or b != old:
+                    mq.pub(f"zones/{zid}/state", b)
+                    last_z[zid] = b
+                    if log_changes:
+                        print(f"[{tick}] 🟡 Zone '{zname}' → {b}")
 
             entree = SPCClient.zone_input(z)
             if entree in (0, 1, 2, 3):
@@ -1382,6 +1442,8 @@ def main() -> None:
         for a in data["areas"]:
             sid = SPCClient.area_id(a)
             if not sid:
+                continue
+            if not info_flags.get("secteurs", True):
                 continue
             s = SPCClient.area_num(a)
             if s < 0:
@@ -1416,6 +1478,9 @@ def main() -> None:
             secteur_lbl = SPCClient.door_sector(d)
             door_names[did] = zone_lbl or secteur_lbl or dname
 
+            if not info_flags.get("doors", True):
+                continue
+
             state = SPCClient.door_state(d)
             if state >= 0:
                 old_state = last_door_state.get(did)
@@ -1449,12 +1514,17 @@ def main() -> None:
                 continue
             oname = SPCClient.output_name(output)
             current_label = output_names.get(oid, "")
-            if oname and oname != current_label:
-                mq.pub(f"outputs/{oid}/name", oname)
+            if oname:
                 output_names[oid] = oname
             elif not current_label:
-                output_names[oid] = oname or f"Sortie {oid}"
+                output_names[oid] = f"Sortie {oid}"
             label = output_names.get(oid) or oname or oid
+
+            if not info_flags.get("outputs", True):
+                continue
+
+            if oname and oname != current_label:
+                mq.pub(f"outputs/{oid}/name", oname)
 
             state = SPCClient.output_state(output)
             if isinstance(state, int) and state >= 0:

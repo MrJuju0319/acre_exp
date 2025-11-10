@@ -48,12 +48,24 @@ mqtt:
   retain: true
 
 watchdog:
-  refresh_interval: 2
-  controller_refresh_interval: 60
+  refresh_interval: 2.0        # secondes (float accepté, min 0.2s)
+  controller_refresh_interval: 60.0
   log_changes: true
+  information:
+    zones: true
+    secteurs: true
+    doors: true
+    outputs: true
+  controle:
+    zones: true
+    secteurs: true
+    doors: true
+    outputs: true
 ```
 
 > ℹ️ L'adresse `spc.host` accepte indifféremment `http://` ou `https://` selon la configuration de la centrale.
+> ℹ️ Les sections `watchdog.information` et `watchdog.controle` permettent de désactiver la publication ou les commandes pour une catégorie. Les valeurs acceptent `true`/`false`, `1`/`0`, `oui`/`non`, etc.
+> ℹ️ Lorsqu'une catégorie est désactivée côté **information**, aucun topic MQTT `name`, `state`, etc. n'est publié pour celle-ci. Lorsqu'elle est désactivée côté **contrôle**, aucun abonnement `…/set` n'est ouvert et toute commande reçue renverra `error:control-disabled`.
 
 ## Mise à jour et vérifications
 
