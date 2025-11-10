@@ -1036,6 +1036,11 @@ def main() -> None:
     info_flags = _build_feature_flags(wd.get("information"))
     control_flags = _build_feature_flags(wd.get("controle"))
 
+    info_zones = info_flags.get("zones", True)
+    info_secteurs = info_flags.get("secteurs", True)
+    info_doors = info_flags.get("doors", True)
+    info_outputs = info_flags.get("outputs", True)
+
     mq  = MQ(cfg, control_flags=control_flags)
 
     print(
@@ -1165,7 +1170,7 @@ def main() -> None:
         if not zid or not zname:
             continue
         zone_names[zid] = zname
-        if not info_flags.get("zones", True):
+        if not info_zones:
             continue
         mq.pub(f"zones/{zid}/name", zname)
         mq.pub(f"zones/{zid}/secteur", SPCClient.zone_sector(z))
@@ -1183,10 +1188,10 @@ def main() -> None:
         sid = SPCClient.area_id(a)
         if not sid:
             continue
-        if info_flags.get("secteurs", True):
+        if info_secteurs:
             mq.pub(f"secteurs/{sid}/name", a.get("nom", ""))
         s = SPCClient.area_num(a)
-        if s >= 0 and info_flags.get("secteurs", True):
+        if s >= 0 and info_secteurs:
             last_a[sid] = s
             mq.pub(f"secteurs/{sid}/state", s)
 
@@ -1198,18 +1203,18 @@ def main() -> None:
         zone_lbl = SPCClient.door_zone(d)
         secteur_lbl = SPCClient.door_sector(d)
         door_names[did] = zone_lbl or secteur_lbl or dname
-        if info_flags.get("doors", True):
+        if info_doors:
             mq.pub(f"doors/{did}/name", dname)
             if zone_lbl:
                 mq.pub(f"doors/{did}/zone", zone_lbl)
             if secteur_lbl:
                 mq.pub(f"doors/{did}/secteur", secteur_lbl)
         state = SPCClient.door_state(d)
-        if state >= 0 and info_flags.get("doors", True):
+        if state >= 0 and info_doors:
             last_door_state[did] = state
             mq.pub(f"doors/{did}/state", state)
         drs = SPCClient.door_drs(d)
-        if drs >= 0 and info_flags.get("doors", True):
+        if drs >= 0 and info_doors:
             last_door_drs[did] = drs
             mq.pub(f"doors/{did}/drs", drs)
 
@@ -1219,7 +1224,7 @@ def main() -> None:
         if not oid:
             continue
         output_names[oid] = oname or output_names.get(oid) or f"Sortie {oid}"
-        if not info_flags.get("outputs", True):
+        if not info_outputs:
             continue
         if oname:
             mq.pub(f"outputs/{oid}/name", oname)
@@ -1396,13 +1401,18 @@ def main() -> None:
 
 
     while running:
-        commands_before = process_commands()
+        iteration_start = time.monotonic()
+        commands_processed = bool(process_commands())
         tick = time.strftime("%H:%M:%S")
         try:
             data = spc.fetch()
         except Exception as e:
             print(f"[SPC] fetch ERR: {e}")
-            time.sleep(interval)
+            if not commands_processed:
+                elapsed = time.monotonic() - iteration_start
+                sleep_time = interval - elapsed
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
             continue
 
         record_area_names(data.get("areas", []))
@@ -1413,7 +1423,7 @@ def main() -> None:
             if not zid or not zname:
                 continue
             zone_names[zid] = zname
-            if not info_flags.get("zones", True):
+            if not info_zones:
                 continue
             b = SPCClient.zone_bin(z)
             if b in (0, 1):
@@ -1443,7 +1453,7 @@ def main() -> None:
             sid = SPCClient.area_id(a)
             if not sid:
                 continue
-            if not info_flags.get("secteurs", True):
+            if not info_secteurs:
                 continue
             s = SPCClient.area_num(a)
             if s < 0:
@@ -1467,7 +1477,8 @@ def main() -> None:
             publish_controller_sections(data.get("controller", []), tick, log_changes)
             next_controller_publish = now_monotonic + controller_interval
 
-        commands_after = process_commands()
+        processed_after = bool(process_commands())
+        commands_processed = commands_processed or processed_after
 
         for d in data.get("doors", []):
             did = SPCClient.door_id(d)
@@ -1478,7 +1489,7 @@ def main() -> None:
             secteur_lbl = SPCClient.door_sector(d)
             door_names[did] = zone_lbl or secteur_lbl or dname
 
-            if not info_flags.get("doors", True):
+            if not info_doors:
                 continue
 
             state = SPCClient.door_state(d)
@@ -1520,7 +1531,7 @@ def main() -> None:
                 output_names[oid] = f"Sortie {oid}"
             label = output_names.get(oid) or oname or oid
 
-            if not info_flags.get("outputs", True):
+            if not info_outputs:
                 continue
 
             if oname and oname != current_label:
@@ -1545,8 +1556,11 @@ def main() -> None:
                     if log_changes:
                         print(f"[{tick}] ⬜ Sortie '{label}' état texte → {state_txt}")
 
-        if not commands_before and not commands_after:
-            time.sleep(interval)
+        if not commands_processed:
+            elapsed = time.monotonic() - iteration_start
+            sleep_time = interval - elapsed
+            if sleep_time > 0:
+                time.sleep(sleep_time)
 
     mq.client.loop_stop()
     try:
