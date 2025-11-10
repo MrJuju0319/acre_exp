@@ -1,0 +1,32 @@
+spc:
+  host: "https://192.168.1.100"
+  user: "Engineer"
+  pin: "1111"
+  language: 253
+  session_cache_dir: "/var/lib/acre_exp"
+  min_login_interval_sec: 60
+
+mqtt:
+  host: "127.0.0.1"
+  port: 1883
+  user: ""
+  pass: ""
+  base_topic: "acre_XXX"
+  client_id: "acre-exp"
+  qos: 0
+  retain: true
+
+watchdog:
+  refresh_interval: 2.0
+  controller_refresh_interval: 60.0
+  log_changes: true
+  information:
+    zones: true
+    secteurs: true
+    doors: true
+    outputs: true
+  controle:
+    zones: true
+    secteurs: true
+    doors: true
+    outputs: true
