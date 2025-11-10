@@ -88,6 +88,21 @@ class SPCClient:
         except Exception:
             pass
 
+    def _reset_session_state(self):
+        try:
+            self.session.cookies.clear()
+        except Exception:
+            pass
+        self.cookiejar = MozillaCookieJar(self.cookie_file)
+        self.session.cookies = self.cookiejar
+        for path in (self.session_file, self.cookie_file):
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+
     @staticmethod
     def _extract_session(text_or_url):
         if not text_or_url:
@@ -132,6 +147,11 @@ class SPCClient:
         sid = d.get("session", "")
         if sid:
             return sid
+        sid = self._do_login()
+        if sid:
+            return sid
+        logging.warning("SPC: échec connexion initiale, purge du cache et nouvel essai")
+        self._reset_session_state()
         return self._do_login()
 
     @staticmethod
@@ -786,6 +806,7 @@ class SPCClient:
     def fetch_status(self):
         sid = self.get_or_login()
         if not sid:
+            logging.error("SPC: impossible d’obtenir une session après tentatives de relogin")
             return {"error": "Impossible d’obtenir une session"}
 
         def _fetch(page: str, referer_page: str = "spc_home"):
@@ -799,6 +820,7 @@ class SPCClient:
         zones = self.parse_zones(r_z.text)
         if len(zones) == 0 and self._is_login_response(r_z.text, getattr(r_z, "url", ""), True):
             logging.debug("Zones parse empty + looks like login — re-login once")
+            self._reset_session_state()
             new_sid = self._do_login()
             if new_sid:
                 sid = new_sid
@@ -812,6 +834,7 @@ class SPCClient:
         areas = self.parse_areas(r_a.text)
         if len(areas) == 0 and self._is_login_response(r_a.text, getattr(r_a, "url", ""), True):
             logging.debug("Areas parse empty + looks like login — re-login once")
+            self._reset_session_state()
             new_sid = self._do_login()
             if new_sid:
                 sid = new_sid
@@ -825,6 +848,7 @@ class SPCClient:
         controller = self.parse_controller(r_c.text)
         if len(controller) == 0 and self._is_login_response(r_c.text, getattr(r_c, "url", ""), True):
             logging.debug("Controller parse empty + looks like login — re-login once")
+            self._reset_session_state()
             new_sid = self._do_login()
             if new_sid:
                 sid = new_sid
@@ -838,6 +862,7 @@ class SPCClient:
         doors = self.parse_doors(r_d.text)
         if len(doors) == 0 and self._is_login_response(r_d.text, getattr(r_d, "url", ""), True):
             logging.debug("Doors parse empty + looks like login — re-login once")
+            self._reset_session_state()
             new_sid = self._do_login()
             if new_sid:
                 sid = new_sid
@@ -851,6 +876,7 @@ class SPCClient:
         outputs = self.parse_outputs(r_o.text)
         if len(outputs) == 0 and self._is_login_response(r_o.text, getattr(r_o, "url", ""), True):
             logging.debug("Outputs parse empty + looks like login — re-login once")
+            self._reset_session_state()
             new_sid = self._do_login()
             if new_sid:
                 sid = new_sid

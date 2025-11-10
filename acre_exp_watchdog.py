@@ -100,14 +100,28 @@ class SPCClient(StatusSPCClient):
     def get_or_login(self) -> str:
         data = self._load_session_cache()
         sid = data.get("session", "")
-        if sid and self._session_valid(sid):
-            return sid
+        if sid:
+            if self._session_valid(sid):
+                return sid
+            if self.debug:
+                logging.debug("Session cache invalide — purge")
+            self._reset_session_state()
+            sid = ""
 
         if self._last_login_too_recent():
             time.sleep(2)
-            if sid and self._session_valid(sid):
-                return sid
+            cached_sid = data.get("session", "")
+            if cached_sid and self._session_valid(cached_sid):
+                return cached_sid
 
+        sid = self._do_login()
+        if sid:
+            return sid
+
+        logging.warning("SPC: login échoué, purge du cache et nouvel essai")
+        self._reset_session_state()
+        if self._last_login_too_recent():
+            time.sleep(2)
         return self._do_login()
 
     @staticmethod
@@ -356,6 +370,10 @@ class SPCClient(StatusSPCClient):
 
     def fetch(self):
         data = super().fetch_status()
+        if isinstance(data, dict) and data.get("error") == "Impossible d’obtenir une session":
+            logging.warning("SPC: session invalide — purge du cache et nouvel essai")
+            self._reset_session_state()
+            data = super().fetch_status()
         if not isinstance(data, dict):
             return {"zones": [], "areas": [], "doors": [], "controller": []}
         if "error" in data:
