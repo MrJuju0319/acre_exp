@@ -836,12 +836,12 @@ class SPCClient:
 
         mapping = {
             "on": {
-                "tokens": {"on", "1", "true", "marche", "start", "actif", "active", "activate", "allume", "allumer", "ouvrir"},
+                "tokens": {"on", "1"},
                 "button_key": "on",
                 "label": "ON",
             },
             "off": {
-                "tokens": {"off", "0", "false", "stop", "arrete", "arret", "arr", "eteindre", "eteint", "inactive", "close"},
+                "tokens": {"off", "0"},
                 "button_key": "off",
                 "label": "OFF",
             },

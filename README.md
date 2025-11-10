@@ -98,10 +98,10 @@ Publier sur `acre_XXX/secteurs/<id>/set` (ou `0` pour *Tous Secteurs*). Charges 
 
 | Valeur | Action |
 | --- | --- |
-| `0`, `mhs`, `off`, `unset`, `desarm`, `stop`, … | Mise Hors Service |
-| `1`, `mes`, `full`, `total`, `totale`, `arm`, … | Mise En Service totale |
-| `2`, `part`, `partial`, `parta`, `partiel`, `partielle`, … | Mise En Service partielle A |
-| `3`, `partb`, `partiel b`, `partial b`, … | Mise En Service partielle B |
+| `0`, `mhs` | Mise Hors Service |
+| `1`, `mes` | Mise En Service totale |
+| `2`, `part` | Mise En Service partielle A |
+| `3`, `partb` | Mise En Service partielle B |
 
 Un accusé est publié sur `acre_XXX/secteurs/<id>/command_result` (`ok:<code>` ou `error:…`). Les codes `ok` correspondent à `state` (0 à 3).
 
@@ -111,10 +111,10 @@ Publier sur `acre_XXX/doors/<id>/set`. Charges utiles acceptées :
 
 | Valeur | Action |
 | --- | --- |
-| `normal`, `reset`, `standard`, … | Bouton **Normal** |
-| `verrouiller`, `lock`, `fermer`, … | Bouton **Verrouiller** |
-| `deverrouiller`, `unlock`, `ouvrir`, … | Bouton **Déverrouiller** |
-| `impulsion`, `pulse`, `toggle`, … | Bouton **Impulsion** |
+| `normal` | Bouton **Normal** |
+| `lock` | Bouton **Verrouiller** |
+| `unlock` | Bouton **Déverrouiller** |
+| `pulse` | Bouton **Impulsion** |
 
 Un accusé est publié sur `acre_XXX/doors/<id>/command_result` (`ok:<action>` ou `error:…`).
 
@@ -124,8 +124,8 @@ Publier sur `acre_XXX/outputs/<id>/set`. Charges utiles acceptées :
 
 | Valeur | Action |
 | --- | --- |
-| `on`, `1`, `true`, `marche`, `start`, … | Bouton **ON** |
-| `off`, `0`, `false`, `stop`, `arret`, `arrêt`, … | Bouton **Off** |
+| `1`, `on` | Bouton **ON** |
+| `0`, `off` | Bouton **Off** |
 
 Un accusé est publié sur `acre_XXX/outputs/<id>/command_result` (`ok:<action>` ou `error:…`).
 
@@ -135,12 +135,12 @@ Publier sur `acre_XXX/zones/<id>/set`. Charges utiles acceptées :
 
 | Valeur | Action |
 | --- | --- |
-| `inhiber`, `inhibit`, `shunt`, … | Bouton **Inhiber** |
-| `deinhiber`, `uninhibit`, `dé-inhiber`, … | Bouton **Dé-Inhiber** |
-| `isoler`, `isolate`, `isolation`, … | Bouton **Isoler** |
-| `deisoler`, `unisolate`, `dé-isoler`, … | Bouton **Dé-Isoler** |
-| `test`, `testjdb`, `soak`, … | Bouton **TestJDB** |
-| `restaurer`, `restore`, `normal`, … | Bouton **Restaurer** |
+| `inhibit` | Bouton **Inhiber** |
+| `uninhibit` | Bouton **Dé-Inhiber** |
+| `isolate` | Bouton **Isoler** |
+| `unisolate` | Bouton **Dé-Isoler** |
+| `testjdb` | Bouton **TestJDB** |
+| `restore` | Bouton **Restaurer** |
 
 Un accusé est publié sur `acre_XXX/zones/<id>/command_result` (`ok:<action>` ou `error:…`).
 

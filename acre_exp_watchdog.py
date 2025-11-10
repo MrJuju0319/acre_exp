@@ -461,19 +461,19 @@ class SPCClient(StatusSPCClient):
         mapping = {
             "fullset": {
                 "mode": 1,
-                "tokens": {"1", "mes", "mes totale", "mes total", "total", "totale", "full", "fullset", "arm", "arme", "armer", "set", "tot"},
+                "tokens": {"1", "mes"},
             },
             "partset_a": {
                 "mode": 2,
-                "tokens": {"2", "part", "partial", "parta", "part a", "partiel", "partiel a", "partset", "partset a", "partseta", "mes partielle", "mes partiel", "mes partielle a", "mes partiel a", "partielle a", "partial a"},
+                "tokens": {"2", "part"},
             },
             "partset_b": {
                 "mode": 3,
-                "tokens": {"3", "partb", "part b", "partiel b", "partset b", "partsetb", "mes partielle b", "mes partiel b", "partielle b", "partial b"},
+                "tokens": {"3", "partb"},
             },
             "unset": {
                 "mode": 0,
-                "tokens": {"0", "mhs", "unset", "off", "stop", "arret", "arreter", "desarm", "desarme", "desarmer", "desactiv", "desactive", "desactivation", "disarm"},
+                "tokens": {"0", "mhs"},
             },
         }
 
@@ -591,82 +591,37 @@ class SPCClient(StatusSPCClient):
 
         mapping = {
             "inhibit": {
-                "tokens": {"inhibit", "inhib", "inhiber", "bypass", "shunt"},
+                "tokens": {"inhibit"},
                 "button": "inhibit",
                 "value": "Inhiber",
                 "label": "Inhiber",
             },
             "uninhibit": {
-                "tokens": {
-                    "de-inhiber",
-                    "de inhiber",
-                    "deinhiber",
-                    "desinhiber",
-                    "de-inhibit",
-                    "de inhibit",
-                    "des-inhiber",
-                    "uninhibit",
-                    "uninhiber",
-                    "retablir inhib",
-                    "retablir inhiber",
-                },
+                "tokens": {"uninhibit"},
                 "button": "uninhibit",
                 "value": "Dé-Inhiber",
                 "label": "Dé-Inhiber",
             },
             "isolate": {
-                "tokens": {"isoler", "isolate", "isolation", "isol"},
+                "tokens": {"isolate"},
                 "button": "isolate",
                 "value": "Isoler",
                 "label": "Isoler",
             },
             "unisolate": {
-                "tokens": {
-                    "de-isoler",
-                    "de isoler",
-                    "deisoler",
-                    "desisoler",
-                    "des-isoler",
-                    "unisoler",
-                    "unisolate",
-                    "de-isolate",
-                    "de isolate",
-                    "retablir isol",
-                    "retablir isoler",
-                },
+                "tokens": {"unisolate"},
                 "button": "unisolate",
                 "value": "Dé-Isoler",
                 "label": "Dé-Isoler",
             },
             "soak": {
-                "tokens": {
-                    "testjdb",
-                    "test jdb",
-                    "test-jdb",
-                    "test",
-                    "jdb",
-                    "soak",
-                    "essai",
-                    "essai jdb",
-                    "mode test",
-                },
+                "tokens": {"testjdb"},
                 "button": "soak",
                 "value": "TestJDB",
                 "label": "Test JDB",
             },
             "restore": {
-                "tokens": {
-                    "restaurer",
-                    "restore",
-                    "reset",
-                    "normal",
-                    "retablir",
-                    "normaliser",
-                    "fin test",
-                    "arreter test",
-                    "stop test",
-                    "stoptest",
-                },
+                "tokens": {"restore"},
                 "button": "restore",
                 "value": "Restaurer",
                 "label": "Restaurer",
@@ -771,25 +726,25 @@ class SPCClient(StatusSPCClient):
 
         mapping = {
             "normal": {
-                "tokens": {"normal", "reset", "std", "standard"},
+                "tokens": {"normal"},
                 "value": "Normal",
                 "label": "Normal",
                 "button_prefix": "normal",
             },
             "lock": {
-                "tokens": {"lock", "verrou", "verrouille", "verrouiller", "fermer", "ferme", "close"},
+                "tokens": {"lock"},
                 "value": "Verrouiller",
                 "label": "Verrouiller",
                 "button_prefix": "lock",
             },
             "unlock": {
-                "tokens": {"unlock", "deverrou", "deverrouille", "deverrouiller", "ouvrir", "open", "liberer", "liberation", "acces libre", "access libre"},
+                "tokens": {"unlock"},
                 "value": "Déverrouiller",
                 "label": "Déverrouiller",
                 "button_prefix": "unlock",
             },
             "pulse": {
-                "tokens": {"pulse", "impulsion", "impulse", "impultion", "moment", "toggle"},
+                "tokens": {"pulse"},
                 "value": "Impulsion",
                 "label": "Impulsion",
                 "button_prefix": "momentary",
