@@ -726,6 +726,186 @@ class SPCClient:
         return outputs
 
     @staticmethod
+    def output_id(output) -> str:
+        if isinstance(output, dict):
+            oid = output.get("id") or output.get("interaction")
+            if oid is not None:
+                return str(oid).strip()
+        return str(output or "").strip()
+
+    @staticmethod
+    def output_name(output) -> str:
+        if isinstance(output, dict):
+            return str(output.get("name") or "").strip()
+        return str(output or "").strip()
+
+    @staticmethod
+    def output_state(output) -> int:
+        if isinstance(output, dict):
+            state = output.get("state")
+            if isinstance(state, int):
+                return state
+        return -1
+
+    @staticmethod
+    def output_state_txt(output) -> str:
+        if isinstance(output, dict):
+            return str(output.get("state_txt") or "").strip()
+        return str(output or "").strip()
+
+    @staticmethod
+    def output_button(output, kind: str):
+        if not isinstance(output, dict):
+            return {}
+        key = "button_on" if kind == "on" else "button_off" if kind == "off" else kind
+        button = output.get(key)
+        if isinstance(button, dict):
+            name = str(button.get("name") or "").strip()
+            value = str(button.get("value") or "").strip()
+            if name:
+                return {"name": name, "value": value}
+        return {}
+
+    def _normalize_command(self, cmd: str) -> str:
+        return self._normalize_label(cmd)
+
+    def _normalize_output_token(self, token: str) -> str:
+        tok = (token or "").strip()
+        if not tok:
+            return ""
+        low = tok.lower()
+        if low.startswith("output") and low[6:].isdigit():
+            return str(int(low[6:]))
+        if low.startswith("out") and low[3:].isdigit():
+            return str(int(low[3:]))
+        if tok.isdigit():
+            return str(int(tok))
+        return tok
+
+    def _resolve_output_number(self, output_id: str):
+        if output_id is None:
+            raise ValueError("identifiant de sortie manquant")
+
+        raw = str(output_id).strip()
+        if not raw:
+            raise ValueError("identifiant de sortie vide")
+
+        norm = self._normalize_command(raw)
+        candidates = []
+        if raw.isdigit():
+            candidates.append(str(int(raw)))
+        if norm.startswith("output") and norm[6:].isdigit():
+            candidates.append(str(int(norm[6:])))
+        if norm.startswith("out") and norm[3:].isdigit():
+            candidates.append(str(int(norm[3:])))
+
+        try:
+            data = self.fetch()
+        except Exception:
+            data = {"outputs": []}
+
+        for output in data.get("outputs", []):
+            oid = self.output_id(output)
+            name = self.output_name(output) or oid
+            interaction = str(output.get("interaction") or "").strip()
+
+            possible = [oid, name, interaction]
+            for cand in possible:
+                cand = str(cand or "").strip()
+                if not cand:
+                    continue
+                cand_norm = self._normalize_command(cand)
+                if cand == raw or (cand_norm and cand_norm == norm):
+                    resolved = oid or interaction or raw
+                    label = name or interaction or resolved
+                    return resolved, label, output
+
+            if oid and oid in candidates:
+                label = name or interaction or oid
+                return oid, label, output
+
+        if candidates:
+            raise ValueError(f"sortie '{raw}' introuvable")
+
+        raise ValueError(f"sortie '{raw}' introuvable")
+
+    def _output_command_to_button(self, output_data: dict, command: str):
+        norm = self._normalize_command(command)
+        if not norm:
+            raise ValueError("commande vide")
+
+        mapping = {
+            "on": {
+                "tokens": {"on", "1", "true", "marche", "start", "actif", "active", "activate", "allume", "allumer", "ouvrir"},
+                "button_key": "on",
+                "label": "ON",
+            },
+            "off": {
+                "tokens": {"off", "0", "false", "stop", "arrete", "arret", "arr", "eteindre", "eteint", "inactive", "close"},
+                "button_key": "off",
+                "label": "OFF",
+            },
+        }
+
+        for action, info in mapping.items():
+            if norm in info["tokens"]:
+                button = self.output_button(output_data, info["button_key"])
+                name = button.get("name")
+                value = button.get("value") or (info["label"].strip() if info.get("label") else "1")
+                if not name:
+                    raise ValueError("bouton de commande sortie introuvable")
+                return name, value, action, info.get("label") or action.upper()
+
+        raise ValueError(f"commande '{command}' inconnue")
+
+    def send_output_command(self, output_id: str, command: str):
+        output_num, output_label, output_data = self._resolve_output_number(output_id)
+        if not output_data:
+            raise RuntimeError("Informations sortie indisponibles")
+        button, value, action, action_label = self._output_command_to_button(output_data, command)
+
+        sid = self.get_or_login()
+        if not sid:
+            raise RuntimeError("Impossible d’obtenir une session")
+
+        def _post_action(current_sid):
+            url = (
+                f"{self.host}/secure.htm?session={current_sid}&page=status_mg"
+                "&action=update"
+            )
+            referer = f"{self.host}/secure.htm?session={current_sid}&page=status_mg"
+            payload = value if value is not None else "1"
+            data = {button: payload}
+            return self._post(url, data=data, referer=referer)
+
+        try:
+            r = _post_action(sid)
+        except Exception as exc:
+            logging.debug("POST commande sortie échoué, tentative relogin", exc_info=True)
+            sid = self._do_login()
+            if not sid:
+                raise RuntimeError(f"Impossible d’envoyer la commande sortie ({exc})")
+            r = _post_action(sid)
+
+        if self._is_login_response(getattr(r, "text", ""), getattr(r, "url", ""), True):
+            sid = self._do_login()
+            if not sid:
+                raise RuntimeError("Session expirée, relogin impossible")
+            r = _post_action(sid)
+            if self._is_login_response(getattr(r, "text", ""), getattr(r, "url", ""), True):
+                raise RuntimeError("Commande sortie refusée (retour page login)")
+
+        label = output_label or f"Sortie {output_num}"
+        return {
+            "ok": True,
+            "output_id": output_num,
+            "button": button,
+            "action": action,
+            "action_label": action_label,
+            "label": label,
+        }
+
+    @staticmethod
     def _slug(text: str) -> str:
         norm = SPCClient._normalize_label(text)
         if not norm:
