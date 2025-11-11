@@ -1245,7 +1245,7 @@ def main() -> None:
     command_state_labels = {
         0: "MHS",
         1: "MES totale",
-        2: "MES partielle A (Nuit)",
+        2: "MES partielle A ou Nuit",
         3: "MES partielle B",
         4: "Alarme",
     }
@@ -1466,8 +1466,8 @@ def main() -> None:
                     state_txt = {
                         0: "MHS",
                         1: "MES",
-                        2: "MES partiel A (Nuit)",
-                        3: "MES partiel B",
+                        2: "MES partielle A ou Nuit",
+                        3: "MES partielle B",
                         4: "Alarme",
                     }.get(s, str(s))
                     print(f"[{tick}] 🔵 Secteur '{a.get('nom', sid)}' → {state_txt}")
