@@ -92,7 +92,7 @@ mosquitto_sub -h 127.0.0.1 -t 'acre_XXX/#' -v
 | --- | --- |
 | `acre_XXX/zones/<id>/state` | 0 = zone normale, 1 = zone activée |
 | `acre_XXX/zones/<id>/entree` | 1 = entrée fermée, 0 = entrée ouverte/alarme |
-| `acre_XXX/secteurs/<id>/state` | 0 = MHS, 1 = MES totale, 2 = MES partielle A, 3 = MES partielle B, 4 = alarme |
+| `acre_XXX/secteurs/<id>/state` | 0 = MHS, 1 = MES totale, 2 = MES partielle A (Nuit), 3 = MES partielle B, 4 = alarme |
 | `acre_XXX/doors/<id>/state` | 0 = porte normale/verrouillée, 1 = porte déverrouillée/accès libre, 4 = alarme |
 | `acre_XXX/doors/<id>/drs` | 0 = bouton de sortie relâché (fermé), 1 = bouton appuyé (ouvert) |
 | `acre_XXX/etat/<section>/<Libellé>` | Valeurs textuelles de l'onglet « État Centrale » |
@@ -112,7 +112,7 @@ Publier sur `acre_XXX/secteurs/<id>/set` (ou `0` pour *Tous Secteurs*). Charges 
 | --- | --- |
 | `0`, `mhs` | Mise Hors Service |
 | `1`, `mes` | Mise En Service totale |
-| `2`, `part` | Mise En Service partielle A |
+| `2`, `part` | Mise En Service partielle A (Nuit) |
 | `3`, `partb` | Mise En Service partielle B |
 
 Un accusé est publié sur `acre_XXX/secteurs/<id>/command_result` (`ok:<code>` ou `error:…`). Les codes `ok` correspondent à `state` (0 à 3).
