@@ -92,7 +92,7 @@ mosquitto_sub -h 127.0.0.1 -t 'acre_XXX/#' -v
 | --- | --- |
 | `acre_XXX/zones/<id>/state` | 0 = zone normale, 1 = zone activée |
 | `acre_XXX/zones/<id>/entree` | 1 = entrée fermée, 0 = entrée ouverte/alarme |
-| `acre_XXX/secteurs/<id>/state` | 0 = MHS, 1 = MES totale, 2 = Nuit (MES partielle A), 3 = MES partielle B, 4 = alarme |
+| `acre_XXX/secteurs/<id>/state` | 0 = MHS, 1 = MES totale, 2 = Nuit, 3 = MES partielle B, 4 = alarme |
 | `acre_XXX/doors/<id>/state` | 0 = porte normale/verrouillée, 1 = porte déverrouillée/accès libre, 4 = alarme |
 | `acre_XXX/doors/<id>/drs` | 0 = bouton de sortie relâché (fermé), 1 = bouton appuyé (ouvert) |
 | `acre_XXX/etat/<section>/<Libellé>` | Valeurs textuelles de l'onglet « État Centrale » |

@@ -11,6 +11,15 @@ from typing import Dict, Set, Optional
 
 from acre_exp_status import SPCClient as StatusSPCClient
 
+
+AREA_STATE_LABELS = {
+    0: "MHS",
+    1: "MES",
+    2: "Nuit",
+    3: "MES partielle B",
+    4: "Alarme",
+}
+
 # paho-mqtt v2.x (API V5) recommandé — compatibilité assurée avec v1.x
 try:
     from paho.mqtt import client as mqtt
@@ -1256,13 +1265,8 @@ def main() -> None:
 
     print("[SPC→MQTT] État initial publié.")
 
-    command_state_labels = {
-        0: "MHS",
-        1: "MES totale",
-        2: "Nuit",
-        3: "MES partielle B",
-        4: "Alarme",
-    }
+    command_state_labels = dict(AREA_STATE_LABELS)
+    command_state_labels[1] = "MES totale"
 
     def _normalize_area_token(token: str) -> str:
         tok = (token or "").strip()
@@ -1477,13 +1481,7 @@ def main() -> None:
                 mq.pub(f"secteurs/{sid}/state", s)
                 last_a[sid] = s
                 if log_changes:
-                    state_txt = {
-                        0: "MHS",
-                        1: "MES",
-                        2: "Nuit",
-                        3: "MES partielle B",
-                        4: "Alarme",
-                    }.get(s, str(s))
+                    state_txt = AREA_STATE_LABELS.get(s, str(s))
                     print(f"[{tick}] 🔵 Secteur '{a.get('nom', sid)}' → {state_txt}")
 
         now_monotonic = time.monotonic()
