@@ -493,31 +493,38 @@ class SPCClient(StatusSPCClient):
             "fullset": {
                 "mode": 1,
                 "tokens": {"1", "mes"},
+                "label": "MES totale",
             },
             "partset_a": {
                 "mode": 2,
-                "tokens": {"2", "part"},
+                "tokens": {"2", "part", "nuit"},
+                "label": "MES partielle A",
+                "token_labels": {"nuit": "Nuit"},
             },
             "partset_b": {
                 "mode": 3,
                 "tokens": {"3", "partb"},
+                "label": "MES partielle B",
             },
             "unset": {
                 "mode": 0,
                 "tokens": {"0", "mhs"},
+                "label": "MHS",
             },
         }
 
         for action, info in mapping.items():
             if norm in info["tokens"]:
                 button = f"{action}_{area_suffix}"
-                return button, info["mode"]
+                mode = info["mode"]
+                label = info.get("token_labels", {}).get(norm) or info.get("label") or action
+                return button, mode, label, norm
 
         raise ValueError(f"commande '{command}' inconnue")
 
     def send_area_command(self, area_id: str, command: str):
         area_num, suffix, area_label = self._resolve_area_suffix(area_id)
-        button, mode = self._command_to_button(suffix, command)
+        button, mode, mode_label, matched = self._command_to_button(suffix, command)
 
         sid = self.get_or_login()
         if not sid:
@@ -551,7 +558,15 @@ class SPCClient(StatusSPCClient):
                 raise RuntimeError("Commande refusée (retour page login)")
 
         label = area_label or area_num or suffix
-        return {"ok": True, "area_id": area_num or "0", "mode": mode, "button": button, "label": label}
+        return {
+            "ok": True,
+            "area_id": area_num or "0",
+            "mode": mode,
+            "button": button,
+            "label": label,
+            "mode_label": mode_label,
+            "token": matched,
+        }
 
     def _resolve_zone_number(self, zone_id: str):
         if zone_id is None:
@@ -1245,7 +1260,7 @@ def main() -> None:
     command_state_labels = {
         0: "MHS",
         1: "MES totale",
-        2: "MES partielle A ou Nuit",
+        2: "MES partielle A",
         3: "MES partielle B",
         4: "Alarme",
     }
@@ -1337,7 +1352,7 @@ def main() -> None:
                     status_payload = f"ok:{mode}" if mode >= 0 else "ok"
                     mq.pub(f"secteurs/{ack_id}/command_result", status_payload)
                     if log_changes:
-                        mode_label = command_state_labels.get(mode, str(mode))
+                        mode_label = result.get("mode_label") or command_state_labels.get(mode, str(mode))
                         print(f"[{tick_cmd}] ✅ Commande secteur '{label}' → {mode_label}")
                 except Exception as err:
                     mq.pub(f"secteurs/{ack_id}/command_result", f"error:{err}")
@@ -1466,7 +1481,7 @@ def main() -> None:
                     state_txt = {
                         0: "MHS",
                         1: "MES",
-                        2: "MES partielle A ou Nuit",
+                        2: "MES partielle A",
                         3: "MES partielle B",
                         4: "Alarme",
                     }.get(s, str(s))
