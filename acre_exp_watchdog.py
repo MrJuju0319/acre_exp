@@ -498,8 +498,7 @@ class SPCClient(StatusSPCClient):
             "partset_a": {
                 "mode": 2,
                 "tokens": {"2", "part", "nuit"},
-                "label": "MES partielle A",
-                "token_labels": {"nuit": "Nuit"},
+                "label": "Nuit",
             },
             "partset_b": {
                 "mode": 3,
@@ -1260,7 +1259,7 @@ def main() -> None:
     command_state_labels = {
         0: "MHS",
         1: "MES totale",
-        2: "MES partielle A",
+        2: "Nuit",
         3: "MES partielle B",
         4: "Alarme",
     }
@@ -1481,7 +1480,7 @@ def main() -> None:
                     state_txt = {
                         0: "MHS",
                         1: "MES",
-                        2: "MES partielle A",
+                        2: "Nuit",
                         3: "MES partielle B",
                         4: "Alarme",
                     }.get(s, str(s))
