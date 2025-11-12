@@ -95,7 +95,7 @@ ensure_watchdog_feature_flags() {
   [[ -f "$CFG_FILE" ]] || return 0
 
   local result
-  result="$(python3 - "$CFG_FILE" <<'PY' 2>/dev/null)
+  result="$(python3 - "$CFG_FILE" <<'PY' 2>/dev/null
 import sys
 
 try:
@@ -150,7 +150,7 @@ if changed_flag[0]:
 else:
     print("UNCHANGED", end="")
 PY
-)
+)"
 
   local status=$?
   if [[ $status -ne 0 ]]; then
