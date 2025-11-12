@@ -226,6 +226,8 @@ class SPCClient(StatusSPCClient):
         s = cls._normalize_state_text(etat_txt)
         if not s:
             return -1
+        if "nuit" in s or "night" in s:
+            return 2
         if "partiel b" in s or "partielle b" in s or "partial b" in s or "part b" in s:
             return 3
         if "partiel a" in s or "partielle a" in s or "partial a" in s or "part a" in s:
