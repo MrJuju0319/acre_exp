@@ -88,6 +88,21 @@ class SPCClient:
         except Exception:
             pass
 
+    def _reset_session_state(self):
+        try:
+            self.session.cookies.clear()
+        except Exception:
+            pass
+        self.cookiejar = MozillaCookieJar(self.cookie_file)
+        self.session.cookies = self.cookiejar
+        for path in (self.session_file, self.cookie_file):
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+
     @staticmethod
     def _extract_session(text_or_url):
         if not text_or_url:
@@ -132,6 +147,11 @@ class SPCClient:
         sid = d.get("session", "")
         if sid:
             return sid
+        sid = self._do_login()
+        if sid:
+            return sid
+        logging.warning("SPC: échec connexion initiale, purge du cache et nouvel essai")
+        self._reset_session_state()
         return self._do_login()
 
     @staticmethod
@@ -362,6 +382,8 @@ class SPCClient:
     @staticmethod
     def _map_area_state(txt):
         s = (txt or "").lower()
+        if "nuit" in s or "night" in s:
+            return 2
         if "partiel b" in s or "partielle b" in s or "partial b" in s or "part b" in s:
             return 3
         if "partiel a" in s or "partielle a" in s or "partial a" in s or "part a" in s:
@@ -624,6 +646,268 @@ class SPCClient:
         return doors
 
     @staticmethod
+    def _map_output_state(state_token: str, icon_src: str) -> int:
+        norm = SPCClient._normalize_label(state_token)
+        icon = (icon_src or "").strip().lower()
+        if icon:
+            if "_on" in icon or "-on" in icon or "output_on" in icon:
+                return 1
+            if "_off" in icon or "-off" in icon or "output_off" in icon:
+                return 0
+        if norm:
+            if any(k in norm for k in ("on", "marche", "active", "actif", "ouvert")):
+                return 1
+            if any(k in norm for k in ("off", "arret", "arr", "stop", "inactive", "ferme")):
+                return 0
+        return -1
+
+    def parse_outputs(self, html):
+        soup = BeautifulSoup(html, "html.parser")
+        outputs = []
+
+        table = soup.find("table", {"class": "gridtable"})
+        if not table:
+            return outputs
+
+        rows = table.find_all("tr")
+        if not rows or len(rows) <= 1:
+            return outputs
+
+        for row in rows[1:]:
+            cells = row.find_all("td")
+            if len(cells) < 3:
+                continue
+
+            raw_id = cells[0].get_text(" ", strip=True)
+            if not raw_id:
+                continue
+            m = re.search(r"\d+", raw_id)
+            if m:
+                oid = str(int(m.group(0)))
+            else:
+                oid = raw_id.strip()
+
+            label_cell = cells[1]
+            label_text = label_cell.get_text(" ", strip=True)
+            state_token = ""
+            name = label_text
+            if ":" in label_text:
+                parts = label_text.split(":", 1)
+                state_token = parts[0].strip()
+                name = parts[1].strip()
+            icon = label_cell.find("img")
+            icon_src = icon.get("src", "") if icon else ""
+            state = self._map_output_state(state_token, icon_src)
+
+            action_cell = cells[2]
+            button_on = None
+            button_off = None
+            for button in action_cell.find_all("input"):
+                btn_name = str(button.get("name", "")).strip()
+                btn_value = str(button.get("value", "")).strip()
+                if not btn_name:
+                    continue
+                btn_info = {"name": btn_name, "value": btn_value}
+                low_name = btn_name.lower()
+                if low_name.startswith("on") and button_on is None:
+                    button_on = btn_info
+                elif low_name.startswith("off") and button_off is None:
+                    button_off = btn_info
+
+            outputs.append({
+                "id": oid,
+                "interaction": raw_id,
+                "name": name,
+                "state": state,
+                "state_txt": state_token or label_text,
+                "icon": icon_src,
+                "button_on": button_on or {},
+                "button_off": button_off or {},
+            })
+
+        return outputs
+
+    @staticmethod
+    def output_id(output) -> str:
+        if isinstance(output, dict):
+            oid = output.get("id") or output.get("interaction")
+            if oid is not None:
+                return str(oid).strip()
+        return str(output or "").strip()
+
+    @staticmethod
+    def output_name(output) -> str:
+        if isinstance(output, dict):
+            return str(output.get("name") or "").strip()
+        return str(output or "").strip()
+
+    @staticmethod
+    def output_state(output) -> int:
+        if isinstance(output, dict):
+            state = output.get("state")
+            if isinstance(state, int):
+                return state
+        return -1
+
+    @staticmethod
+    def output_state_txt(output) -> str:
+        if isinstance(output, dict):
+            return str(output.get("state_txt") or "").strip()
+        return str(output or "").strip()
+
+    @staticmethod
+    def output_button(output, kind: str):
+        if not isinstance(output, dict):
+            return {}
+        key = "button_on" if kind == "on" else "button_off" if kind == "off" else kind
+        button = output.get(key)
+        if isinstance(button, dict):
+            name = str(button.get("name") or "").strip()
+            value = str(button.get("value") or "").strip()
+            if name:
+                return {"name": name, "value": value}
+        return {}
+
+    def _normalize_command(self, cmd: str) -> str:
+        return self._normalize_label(cmd)
+
+    def _normalize_output_token(self, token: str) -> str:
+        tok = (token or "").strip()
+        if not tok:
+            return ""
+        low = tok.lower()
+        if low.startswith("output") and low[6:].isdigit():
+            return str(int(low[6:]))
+        if low.startswith("out") and low[3:].isdigit():
+            return str(int(low[3:]))
+        if tok.isdigit():
+            return str(int(tok))
+        return tok
+
+    def _resolve_output_number(self, output_id: str):
+        if output_id is None:
+            raise ValueError("identifiant de sortie manquant")
+
+        raw = str(output_id).strip()
+        if not raw:
+            raise ValueError("identifiant de sortie vide")
+
+        norm = self._normalize_command(raw)
+        candidates = []
+        if raw.isdigit():
+            candidates.append(str(int(raw)))
+        if norm.startswith("output") and norm[6:].isdigit():
+            candidates.append(str(int(norm[6:])))
+        if norm.startswith("out") and norm[3:].isdigit():
+            candidates.append(str(int(norm[3:])))
+
+        try:
+            data = self.fetch()
+        except Exception:
+            data = {"outputs": []}
+
+        for output in data.get("outputs", []):
+            oid = self.output_id(output)
+            name = self.output_name(output) or oid
+            interaction = str(output.get("interaction") or "").strip()
+
+            possible = [oid, name, interaction]
+            for cand in possible:
+                cand = str(cand or "").strip()
+                if not cand:
+                    continue
+                cand_norm = self._normalize_command(cand)
+                if cand == raw or (cand_norm and cand_norm == norm):
+                    resolved = oid or interaction or raw
+                    label = name or interaction or resolved
+                    return resolved, label, output
+
+            if oid and oid in candidates:
+                label = name or interaction or oid
+                return oid, label, output
+
+        if candidates:
+            raise ValueError(f"sortie '{raw}' introuvable")
+
+        raise ValueError(f"sortie '{raw}' introuvable")
+
+    def _output_command_to_button(self, output_data: dict, command: str):
+        norm = self._normalize_command(command)
+        if not norm:
+            raise ValueError("commande vide")
+
+        mapping = {
+            "on": {
+                "tokens": {"on", "1"},
+                "button_key": "on",
+                "label": "ON",
+            },
+            "off": {
+                "tokens": {"off", "0"},
+                "button_key": "off",
+                "label": "OFF",
+            },
+        }
+
+        for action, info in mapping.items():
+            if norm in info["tokens"]:
+                button = self.output_button(output_data, info["button_key"])
+                name = button.get("name")
+                value = button.get("value") or (info["label"].strip() if info.get("label") else "1")
+                if not name:
+                    raise ValueError("bouton de commande sortie introuvable")
+                return name, value, action, info.get("label") or action.upper()
+
+        raise ValueError(f"commande '{command}' inconnue")
+
+    def send_output_command(self, output_id: str, command: str):
+        output_num, output_label, output_data = self._resolve_output_number(output_id)
+        if not output_data:
+            raise RuntimeError("Informations sortie indisponibles")
+        button, value, action, action_label = self._output_command_to_button(output_data, command)
+
+        sid = self.get_or_login()
+        if not sid:
+            raise RuntimeError("Impossible d’obtenir une session")
+
+        def _post_action(current_sid):
+            url = (
+                f"{self.host}/secure.htm?session={current_sid}&page=status_mg"
+                "&action=update"
+            )
+            referer = f"{self.host}/secure.htm?session={current_sid}&page=status_mg"
+            payload = value if value is not None else "1"
+            data = {button: payload}
+            return self._post(url, data=data, referer=referer)
+
+        try:
+            r = _post_action(sid)
+        except Exception as exc:
+            logging.debug("POST commande sortie échoué, tentative relogin", exc_info=True)
+            sid = self._do_login()
+            if not sid:
+                raise RuntimeError(f"Impossible d’envoyer la commande sortie ({exc})")
+            r = _post_action(sid)
+
+        if self._is_login_response(getattr(r, "text", ""), getattr(r, "url", ""), True):
+            sid = self._do_login()
+            if not sid:
+                raise RuntimeError("Session expirée, relogin impossible")
+            r = _post_action(sid)
+            if self._is_login_response(getattr(r, "text", ""), getattr(r, "url", ""), True):
+                raise RuntimeError("Commande sortie refusée (retour page login)")
+
+        label = output_label or f"Sortie {output_num}"
+        return {
+            "ok": True,
+            "output_id": output_num,
+            "button": button,
+            "action": action,
+            "action_label": action_label,
+            "label": label,
+        }
+
+    @staticmethod
     def _slug(text: str) -> str:
         norm = SPCClient._normalize_label(text)
         if not norm:
@@ -704,6 +988,7 @@ class SPCClient:
     def fetch_status(self):
         sid = self.get_or_login()
         if not sid:
+            logging.error("SPC: impossible d’obtenir une session après tentatives de relogin")
             return {"error": "Impossible d’obtenir une session"}
 
         def _fetch(page: str, referer_page: str = "spc_home"):
@@ -717,6 +1002,7 @@ class SPCClient:
         zones = self.parse_zones(r_z.text)
         if len(zones) == 0 and self._is_login_response(r_z.text, getattr(r_z, "url", ""), True):
             logging.debug("Zones parse empty + looks like login — re-login once")
+            self._reset_session_state()
             new_sid = self._do_login()
             if new_sid:
                 sid = new_sid
@@ -730,6 +1016,7 @@ class SPCClient:
         areas = self.parse_areas(r_a.text)
         if len(areas) == 0 and self._is_login_response(r_a.text, getattr(r_a, "url", ""), True):
             logging.debug("Areas parse empty + looks like login — re-login once")
+            self._reset_session_state()
             new_sid = self._do_login()
             if new_sid:
                 sid = new_sid
@@ -743,6 +1030,7 @@ class SPCClient:
         controller = self.parse_controller(r_c.text)
         if len(controller) == 0 and self._is_login_response(r_c.text, getattr(r_c, "url", ""), True):
             logging.debug("Controller parse empty + looks like login — re-login once")
+            self._reset_session_state()
             new_sid = self._do_login()
             if new_sid:
                 sid = new_sid
@@ -756,6 +1044,7 @@ class SPCClient:
         doors = self.parse_doors(r_d.text)
         if len(doors) == 0 and self._is_login_response(r_d.text, getattr(r_d, "url", ""), True):
             logging.debug("Doors parse empty + looks like login — re-login once")
+            self._reset_session_state()
             new_sid = self._do_login()
             if new_sid:
                 sid = new_sid
@@ -764,9 +1053,23 @@ class SPCClient:
                 doors = self.parse_doors(r_d.text)
                 logging.debug("doors retry length: %d — parsed: %d", len(r_d.text), len(doors))
 
+        sid, r_o = _fetch("status_mg", referer_page="status_outputs_menu")
+        logging.debug("Requesting outputs from: %s (len=%d)", r_o.url, len(r_o.text))
+        outputs = self.parse_outputs(r_o.text)
+        if len(outputs) == 0 and self._is_login_response(r_o.text, getattr(r_o, "url", ""), True):
+            logging.debug("Outputs parse empty + looks like login — re-login once")
+            self._reset_session_state()
+            new_sid = self._do_login()
+            if new_sid:
+                sid = new_sid
+                r_o = self._get(f"{self.host}/secure.htm?session={sid}&page=status_mg",
+                                 referer=f"{self.host}/secure.htm?session={sid}&page=status_outputs_menu")
+                outputs = self.parse_outputs(r_o.text)
+                logging.debug("outputs retry length: %d — parsed: %d", len(r_o.text), len(outputs))
+
         self._save_cookies()
         self._save_session_cache(sid)
-        return {"zones": zones, "areas": areas, "doors": doors, "controller": controller}
+        return {"zones": zones, "areas": areas, "doors": doors, "outputs": outputs, "controller": controller}
 
 def main():
     parser = argparse.ArgumentParser()

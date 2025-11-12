@@ -48,12 +48,24 @@ mqtt:
   retain: true
 
 watchdog:
-  refresh_interval: 2
-  controller_refresh_interval: 60
+  refresh_interval: 2.0        # secondes (float accepté, min 0.2s)
+  controller_refresh_interval: 60.0
   log_changes: true
+  information:
+    zones: true
+    secteurs: true
+    doors: true
+    outputs: true
+  controle:
+    zones: true
+    secteurs: true
+    doors: true
+    outputs: true
 ```
 
 > ℹ️ L'adresse `spc.host` accepte indifféremment `http://` ou `https://` selon la configuration de la centrale.
+> ℹ️ Les sections `watchdog.information` et `watchdog.controle` permettent de désactiver la publication ou les commandes pour une catégorie. Les valeurs acceptent `true`/`false`, `1`/`0`, `oui`/`non`, etc.
+> ℹ️ Lorsqu'une catégorie est désactivée côté **information**, aucun topic MQTT `name`, `state`, etc. n'est publié pour celle-ci. Lorsqu'elle est désactivée côté **contrôle**, aucun abonnement `…/set` n'est ouvert et toute commande reçue renverra `error:control-disabled`.
 
 ## Mise à jour et vérifications
 
@@ -80,10 +92,12 @@ mosquitto_sub -h 127.0.0.1 -t 'acre_XXX/#' -v
 | --- | --- |
 | `acre_XXX/zones/<id>/state` | 0 = zone normale, 1 = zone activée |
 | `acre_XXX/zones/<id>/entree` | 1 = entrée fermée, 0 = entrée ouverte/alarme |
-| `acre_XXX/secteurs/<id>/state` | 0 = MHS, 1 = MES totale, 2 = MES partielle A, 3 = MES partielle B, 4 = alarme |
+| `acre_XXX/secteurs/<id>/state` | 0 = MHS, 1 = MES totale, 2 = Nuit, 3 = MES partielle B, 4 = alarme |
 | `acre_XXX/doors/<id>/state` | 0 = porte normale/verrouillée, 1 = porte déverrouillée/accès libre, 4 = alarme |
 | `acre_XXX/doors/<id>/drs` | 0 = bouton de sortie relâché (fermé), 1 = bouton appuyé (ouvert) |
 | `acre_XXX/etat/<section>/<Libellé>` | Valeurs textuelles de l'onglet « État Centrale » |
+| `acre_XXX/outputs/<id>/state` | 0 = sortie à l'arrêt, 1 = sortie activée |
+| `acre_XXX/outputs/<id>/state_txt` | Texte brut (« On », « Off », …) affiché sur la page Intéraction Logique |
 
 > ℹ️ Les topics `name`, `zone` et `secteur` sont également publiés pour chaque porte (`doors/<id>/…`).
 > ℹ️ L’identifiant `0` dans `secteurs/0/state` représente le statut global « Tous Secteurs » lu sur la page *État du système*.
@@ -96,10 +110,10 @@ Publier sur `acre_XXX/secteurs/<id>/set` (ou `0` pour *Tous Secteurs*). Charges 
 
 | Valeur | Action |
 | --- | --- |
-| `0`, `mhs`, `off`, `unset`, `desarm`, `stop`, … | Mise Hors Service |
-| `1`, `mes`, `full`, `total`, `totale`, `arm`, … | Mise En Service totale |
-| `2`, `part`, `partial`, `parta`, `partiel`, `partielle`, … | Mise En Service partielle A |
-| `3`, `partb`, `partiel b`, `partial b`, … | Mise En Service partielle B |
+| `0`, `mhs` | Mise Hors Service |
+| `1`, `mes` | Mise En Service totale |
+| `2`, `part`, `nuit` | Bouton « Nuit » (Mise En Service partielle A) |
+| `3`, `partb` | Mise En Service partielle B |
 
 Un accusé est publié sur `acre_XXX/secteurs/<id>/command_result` (`ok:<code>` ou `error:…`). Les codes `ok` correspondent à `state` (0 à 3).
 
@@ -109,12 +123,23 @@ Publier sur `acre_XXX/doors/<id>/set`. Charges utiles acceptées :
 
 | Valeur | Action |
 | --- | --- |
-| `normal`, `reset`, `standard`, … | Bouton **Normal** |
-| `verrouiller`, `lock`, `fermer`, … | Bouton **Verrouiller** |
-| `deverrouiller`, `unlock`, `ouvrir`, … | Bouton **Déverrouiller** |
-| `impulsion`, `pulse`, `toggle`, … | Bouton **Impulsion** |
+| `normal` | Bouton **Normal** |
+| `lock` | Bouton **Verrouiller** |
+| `unlock` | Bouton **Déverrouiller** |
+| `pulse` | Bouton **Impulsion** |
 
 Un accusé est publié sur `acre_XXX/doors/<id>/command_result` (`ok:<action>` ou `error:…`).
+
+### Sorties
+
+Publier sur `acre_XXX/outputs/<id>/set`. Charges utiles acceptées :
+
+| Valeur | Action |
+| --- | --- |
+| `1`, `on` | Bouton **ON** |
+| `0`, `off` | Bouton **Off** |
+
+Un accusé est publié sur `acre_XXX/outputs/<id>/command_result` (`ok:<action>` ou `error:…`).
 
 ### Zones
 
@@ -122,12 +147,12 @@ Publier sur `acre_XXX/zones/<id>/set`. Charges utiles acceptées :
 
 | Valeur | Action |
 | --- | --- |
-| `inhiber`, `inhibit`, `shunt`, … | Bouton **Inhiber** |
-| `deinhiber`, `uninhibit`, `dé-inhiber`, … | Bouton **Dé-Inhiber** |
-| `isoler`, `isolate`, `isolation`, … | Bouton **Isoler** |
-| `deisoler`, `unisolate`, `dé-isoler`, … | Bouton **Dé-Isoler** |
-| `test`, `testjdb`, `soak`, … | Bouton **TestJDB** |
-| `restaurer`, `restore`, `normal`, … | Bouton **Restaurer** |
+| `inhibit` | Bouton **Inhiber** |
+| `uninhibit` | Bouton **Dé-Inhiber** |
+| `isolate` | Bouton **Isoler** |
+| `unisolate` | Bouton **Dé-Isoler** |
+| `testjdb` | Bouton **TestJDB** |
+| `restore` | Bouton **Restaurer** |
 
 Un accusé est publié sur `acre_XXX/zones/<id>/command_result` (`ok:<action>` ou `error:…`).
 

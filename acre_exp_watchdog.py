@@ -7,9 +7,18 @@ import yaml
 import requests
 from bs4 import BeautifulSoup
 from http.cookiejar import MozillaCookieJar
-from typing import Dict, Set
+from typing import Dict, Set, Optional
 
 from acre_exp_status import SPCClient as StatusSPCClient
+
+
+AREA_STATE_LABELS = {
+    0: "MHS",
+    1: "MES",
+    2: "Nuit",
+    3: "MES partielle B",
+    4: "Alarme",
+}
 
 # paho-mqtt v2.x (API V5) recommandé — compatibilité assurée avec v1.x
 try:
@@ -30,6 +39,37 @@ def load_cfg(path: str):
 def ensure_dir(p):
     import pathlib
     pathlib.Path(p).mkdir(parents=True, exist_ok=True)
+
+
+def _coerce_bool(value, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if not normalized:
+            return default
+        true_tokens = {"1", "true", "yes", "y", "on", "oui"}
+        false_tokens = {"0", "false", "no", "n", "off", "non"}
+        if normalized in true_tokens:
+            return True
+        if normalized in false_tokens:
+            return False
+    return default
+
+
+def _coerce_float(value, default: float, min_value: float) -> float:
+    try:
+        result = float(value)
+    except Exception:
+        result = default
+    if result < min_value:
+        return min_value
+    return result
+
 
 class SPCClient(StatusSPCClient):
     def __init__(self, cfg: dict, debug: bool = False):
@@ -100,14 +140,28 @@ class SPCClient(StatusSPCClient):
     def get_or_login(self) -> str:
         data = self._load_session_cache()
         sid = data.get("session", "")
-        if sid and self._session_valid(sid):
-            return sid
+        if sid:
+            if self._session_valid(sid):
+                return sid
+            if self.debug:
+                logging.debug("Session cache invalide — purge")
+            self._reset_session_state()
+            sid = ""
 
         if self._last_login_too_recent():
             time.sleep(2)
-            if sid and self._session_valid(sid):
-                return sid
+            cached_sid = data.get("session", "")
+            if cached_sid and self._session_valid(cached_sid):
+                return cached_sid
 
+        sid = self._do_login()
+        if sid:
+            return sid
+
+        logging.warning("SPC: login échoué, purge du cache et nouvel essai")
+        self._reset_session_state()
+        if self._last_login_too_recent():
+            time.sleep(2)
         return self._do_login()
 
     @staticmethod
@@ -172,6 +226,8 @@ class SPCClient(StatusSPCClient):
         s = cls._normalize_state_text(etat_txt)
         if not s:
             return -1
+        if "nuit" in s or "night" in s:
+            return 2
         if "partiel b" in s or "partielle b" in s or "partial b" in s or "part b" in s:
             return 3
         if "partiel a" in s or "partielle a" in s or "partial a" in s or "part a" in s:
@@ -299,6 +355,47 @@ class SPCClient(StatusSPCClient):
         return StatusSPCClient._map_door_state(txt)
 
     @staticmethod
+    def output_id(output) -> str:
+        if isinstance(output, dict):
+            oid = output.get("id") or output.get("interaction")
+            if oid is not None:
+                return str(oid).strip()
+        return str(output or "").strip()
+
+    @staticmethod
+    def output_name(output) -> str:
+        if isinstance(output, dict):
+            return str(output.get("name") or "").strip()
+        return str(output or "").strip()
+
+    @staticmethod
+    def output_state(output) -> int:
+        if isinstance(output, dict):
+            state = output.get("state")
+            if isinstance(state, int):
+                return state
+        return -1
+
+    @staticmethod
+    def output_state_txt(output) -> str:
+        if isinstance(output, dict):
+            return str(output.get("state_txt") or "").strip()
+        return str(output or "").strip()
+
+    @staticmethod
+    def output_button(output, kind: str) -> Dict[str, str]:
+        if not isinstance(output, dict):
+            return {}
+        key = "button_on" if kind == "on" else "button_off" if kind == "off" else kind
+        button = output.get(key)
+        if isinstance(button, dict):
+            name = str(button.get("name") or "").strip()
+            value = str(button.get("value") or "").strip()
+            if name:
+                return {"name": name, "value": value}
+        return {}
+
+    @staticmethod
     def area_id(area) -> str:
         if isinstance(area, dict):
             sid = area.get("sid")
@@ -315,6 +412,10 @@ class SPCClient(StatusSPCClient):
 
     def fetch(self):
         data = super().fetch_status()
+        if isinstance(data, dict) and data.get("error") == "Impossible d’obtenir une session":
+            logging.warning("SPC: session invalide — purge du cache et nouvel essai")
+            self._reset_session_state()
+            data = super().fetch_status()
         if not isinstance(data, dict):
             return {"zones": [], "areas": [], "doors": [], "controller": []}
         if "error" in data:
@@ -339,9 +440,15 @@ class SPCClient(StatusSPCClient):
                 if not d.get("id"):
                     d["id"] = self.door_id(d)
 
+        outputs = data.get("outputs", [])
+        for o in outputs:
+            if isinstance(o, dict):
+                if not o.get("id"):
+                    o["id"] = self.output_id(o)
+
         controller = data.get("controller", [])
 
-        return {"zones": zones, "areas": areas, "doors": doors, "controller": controller}
+        return {"zones": zones, "areas": areas, "doors": doors, "outputs": outputs, "controller": controller}
 
     @staticmethod
     def _normalize_command(cmd: str) -> str:
@@ -396,32 +503,38 @@ class SPCClient(StatusSPCClient):
         mapping = {
             "fullset": {
                 "mode": 1,
-                "tokens": {"1", "mes", "mes totale", "mes total", "total", "totale", "full", "fullset", "arm", "arme", "armer", "set", "tot"},
+                "tokens": {"1", "mes"},
+                "label": "MES totale",
             },
             "partset_a": {
                 "mode": 2,
-                "tokens": {"2", "part", "partial", "parta", "part a", "partiel", "partiel a", "partset", "partset a", "partseta", "mes partielle", "mes partiel", "mes partielle a", "mes partiel a", "partielle a", "partial a"},
+                "tokens": {"2", "part", "nuit"},
+                "label": "Nuit",
             },
             "partset_b": {
                 "mode": 3,
-                "tokens": {"3", "partb", "part b", "partiel b", "partset b", "partsetb", "mes partielle b", "mes partiel b", "partielle b", "partial b"},
+                "tokens": {"3", "partb"},
+                "label": "MES partielle B",
             },
             "unset": {
                 "mode": 0,
-                "tokens": {"0", "mhs", "unset", "off", "stop", "arret", "arreter", "desarm", "desarme", "desarmer", "desactiv", "desactive", "desactivation", "disarm"},
+                "tokens": {"0", "mhs"},
+                "label": "MHS",
             },
         }
 
         for action, info in mapping.items():
             if norm in info["tokens"]:
                 button = f"{action}_{area_suffix}"
-                return button, info["mode"]
+                mode = info["mode"]
+                label = info.get("token_labels", {}).get(norm) or info.get("label") or action
+                return button, mode, label, norm
 
         raise ValueError(f"commande '{command}' inconnue")
 
     def send_area_command(self, area_id: str, command: str):
         area_num, suffix, area_label = self._resolve_area_suffix(area_id)
-        button, mode = self._command_to_button(suffix, command)
+        button, mode, mode_label, matched = self._command_to_button(suffix, command)
 
         sid = self.get_or_login()
         if not sid:
@@ -455,7 +568,15 @@ class SPCClient(StatusSPCClient):
                 raise RuntimeError("Commande refusée (retour page login)")
 
         label = area_label or area_num or suffix
-        return {"ok": True, "area_id": area_num or "0", "mode": mode, "button": button, "label": label}
+        return {
+            "ok": True,
+            "area_id": area_num or "0",
+            "mode": mode,
+            "button": button,
+            "label": label,
+            "mode_label": mode_label,
+            "token": matched,
+        }
 
     def _resolve_zone_number(self, zone_id: str):
         if zone_id is None:
@@ -526,82 +647,37 @@ class SPCClient(StatusSPCClient):
 
         mapping = {
             "inhibit": {
-                "tokens": {"inhibit", "inhib", "inhiber", "bypass", "shunt"},
+                "tokens": {"inhibit"},
                 "button": "inhibit",
                 "value": "Inhiber",
                 "label": "Inhiber",
             },
             "uninhibit": {
-                "tokens": {
-                    "de-inhiber",
-                    "de inhiber",
-                    "deinhiber",
-                    "desinhiber",
-                    "de-inhibit",
-                    "de inhibit",
-                    "des-inhiber",
-                    "uninhibit",
-                    "uninhiber",
-                    "retablir inhib",
-                    "retablir inhiber",
-                },
+                "tokens": {"uninhibit"},
                 "button": "uninhibit",
                 "value": "Dé-Inhiber",
                 "label": "Dé-Inhiber",
             },
             "isolate": {
-                "tokens": {"isoler", "isolate", "isolation", "isol"},
+                "tokens": {"isolate"},
                 "button": "isolate",
                 "value": "Isoler",
                 "label": "Isoler",
             },
             "unisolate": {
-                "tokens": {
-                    "de-isoler",
-                    "de isoler",
-                    "deisoler",
-                    "desisoler",
-                    "des-isoler",
-                    "unisoler",
-                    "unisolate",
-                    "de-isolate",
-                    "de isolate",
-                    "retablir isol",
-                    "retablir isoler",
-                },
+                "tokens": {"unisolate"},
                 "button": "unisolate",
                 "value": "Dé-Isoler",
                 "label": "Dé-Isoler",
             },
             "soak": {
-                "tokens": {
-                    "testjdb",
-                    "test jdb",
-                    "test-jdb",
-                    "test",
-                    "jdb",
-                    "soak",
-                    "essai",
-                    "essai jdb",
-                    "mode test",
-                },
+                "tokens": {"testjdb"},
                 "button": "soak",
                 "value": "TestJDB",
                 "label": "Test JDB",
             },
             "restore": {
-                "tokens": {
-                    "restaurer",
-                    "restore",
-                    "reset",
-                    "normal",
-                    "retablir",
-                    "normaliser",
-                    "fin test",
-                    "arreter test",
-                    "stop test",
-                    "stoptest",
-                },
+                "tokens": {"restore"},
                 "button": "restore",
                 "value": "Restaurer",
                 "label": "Restaurer",
@@ -706,25 +782,25 @@ class SPCClient(StatusSPCClient):
 
         mapping = {
             "normal": {
-                "tokens": {"normal", "reset", "std", "standard"},
+                "tokens": {"normal"},
                 "value": "Normal",
                 "label": "Normal",
                 "button_prefix": "normal",
             },
             "lock": {
-                "tokens": {"lock", "verrou", "verrouille", "verrouiller", "fermer", "ferme", "close"},
+                "tokens": {"lock"},
                 "value": "Verrouiller",
                 "label": "Verrouiller",
                 "button_prefix": "lock",
             },
             "unlock": {
-                "tokens": {"unlock", "deverrou", "deverrouille", "deverrouiller", "ouvrir", "open", "liberer", "liberation", "acces libre", "access libre"},
+                "tokens": {"unlock"},
                 "value": "Déverrouiller",
                 "label": "Déverrouiller",
                 "button_prefix": "unlock",
             },
             "pulse": {
-                "tokens": {"pulse", "impulsion", "impulse", "impultion", "moment", "toggle"},
+                "tokens": {"pulse"},
                 "value": "Impulsion",
                 "label": "Impulsion",
                 "button_prefix": "momentary",
@@ -784,7 +860,7 @@ class SPCClient(StatusSPCClient):
         }
 
 class MQ:
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, control_flags: Optional[Dict[str, bool]] = None):
         m = cfg.get("mqtt", {})
         self.host = m.get("host", "127.0.0.1")
         self.port = int(m.get("port", 1883))
@@ -797,12 +873,18 @@ class MQ:
         proto = str(m.get("protocol", "v311")).lower()
         self.protocol = mqtt.MQTTv5 if proto in ("v5", "mqttv5", "5") else mqtt.MQTTv311
         self.base_parts = [p for p in self.base.split("/") if p]
+        defaults = {"secteurs": True, "zones": True, "doors": True, "outputs": True}
+        control_flags = control_flags or {}
+        self.control_enabled = {}
+        for key, default in defaults.items():
+            self.control_enabled[key] = _coerce_bool(control_flags.get(key), default)
+
         self.command_queue: "queue.Queue" = queue.Queue()
-        self.command_topics = [
-            self._topic("secteurs/+/set") or "secteurs/+/set",
-            self._topic("zones/+/set") or "zones/+/set",
-            self._topic("doors/+/set") or "doors/+/set",
-        ]
+        self.command_topics = []
+        for key in ("secteurs", "zones", "doors", "outputs"):
+            if self.control_enabled.get(key, True):
+                topic = self._topic(f"{key}/+/set") or f"{key}/+/set"
+                self.command_topics.append(topic)
 
         client_kwargs = {
             "client_id": self.client_id,
@@ -889,7 +971,14 @@ class MQ:
             cmd_type = "zone"
         elif category == "doors":
             cmd_type = "door"
+        elif category == "outputs":
+            cmd_type = "output"
         else:
+            return
+        if not self.control_enabled.get(category, True):
+            target = sub[1]
+            print(f"[MQTT] Commande ignorée ({category} désactivé) pour {target}")
+            self.pub(f"{category}/{target}/command_result", "error:control-disabled")
             return
         try:
             payload = msg.payload.decode("utf-8", errors="ignore").strip()
@@ -950,24 +1039,34 @@ def main() -> None:
 
     cfg = load_cfg(args.config)
     wd  = cfg.get("watchdog", {})
-    try:
-        interval = int(wd.get("refresh_interval", 2))
-    except Exception:
-        interval = 2
-    if interval < 1:
-        interval = 1
+    interval = _coerce_float(wd.get("refresh_interval", 2), 2.0, 0.2)
 
-    try:
-        controller_interval = int(wd.get("controller_refresh_interval", 60))
-    except Exception:
-        controller_interval = 60
-    if controller_interval < 1:
-        controller_interval = 1
+    controller_interval = _coerce_float(
+        wd.get("controller_refresh_interval", 60),
+        60.0,
+        1.0,
+    )
 
     log_changes = bool(wd.get("log_changes", True))
 
     spc = SPCClient(cfg, debug=args.debug)
-    mq  = MQ(cfg)
+    def _build_feature_flags(section):
+        if not isinstance(section, dict):
+            section = {}
+        flags = {}
+        for key in ("zones", "secteurs", "doors", "outputs"):
+            flags[key] = _coerce_bool(section.get(key), True)
+        return flags
+
+    info_flags = _build_feature_flags(wd.get("information"))
+    control_flags = _build_feature_flags(wd.get("controle"))
+
+    info_zones = info_flags.get("zones", True)
+    info_secteurs = info_flags.get("secteurs", True)
+    info_doors = info_flags.get("doors", True)
+    info_outputs = info_flags.get("outputs", True)
+
+    mq  = MQ(cfg, control_flags=control_flags)
 
     print(
         "[SPC→MQTT] Démarrage (refresh={zones}s, controller_refresh={ctrl}s) — Broker {host}:{port}".format(
@@ -977,6 +1076,14 @@ def main() -> None:
             port=mq.port,
         )
     )
+    info_summary = ", ".join(
+        f"{k}={'ON' if info_flags.get(k) else 'OFF'}" for k in ("zones", "secteurs", "doors", "outputs")
+    )
+    control_summary = ", ".join(
+        f"{k}={'ON' if control_flags.get(k) else 'OFF'}" for k in ("zones", "secteurs", "doors", "outputs")
+    )
+    print(f"[Config] Information → {info_summary}")
+    print(f"[Config] Contrôle → {control_summary}")
     mq.connect()
 
     last_z: Dict[str, int] = {}
@@ -984,8 +1091,11 @@ def main() -> None:
     last_a: Dict[str, int] = {}
     last_door_state: Dict[str, int] = {}
     last_door_drs: Dict[str, int] = {}
+    last_output_state: Dict[str, int] = {}
+    last_output_text: Dict[str, str] = {}
     zone_names: Dict[str, str] = {}
     door_names: Dict[str, str] = {}
+    output_names: Dict[str, str] = {}
     last_controller: Dict[str, str] = {}
     cleared_legacy_controller_topics: Set[str] = set()
     area_names: Dict[str, str] = {"0": "Tous Secteurs"}
@@ -1085,6 +1195,8 @@ def main() -> None:
         if not zid or not zname:
             continue
         zone_names[zid] = zname
+        if not info_zones:
+            continue
         mq.pub(f"zones/{zid}/name", zname)
         mq.pub(f"zones/{zid}/secteur", SPCClient.zone_sector(z))
         b = SPCClient.zone_bin(z)
@@ -1101,9 +1213,10 @@ def main() -> None:
         sid = SPCClient.area_id(a)
         if not sid:
             continue
-        mq.pub(f"secteurs/{sid}/name", a.get("nom", ""))
+        if info_secteurs:
+            mq.pub(f"secteurs/{sid}/name", a.get("nom", ""))
         s = SPCClient.area_num(a)
-        if s >= 0:
+        if s >= 0 and info_secteurs:
             last_a[sid] = s
             mq.pub(f"secteurs/{sid}/state", s)
 
@@ -1112,35 +1225,50 @@ def main() -> None:
         dname = SPCClient.door_name(d)
         if not did or not dname:
             continue
-        mq.pub(f"doors/{did}/name", dname)
         zone_lbl = SPCClient.door_zone(d)
-        if zone_lbl:
-            mq.pub(f"doors/{did}/zone", zone_lbl)
         secteur_lbl = SPCClient.door_sector(d)
-        if secteur_lbl:
-            mq.pub(f"doors/{did}/secteur", secteur_lbl)
         door_names[did] = zone_lbl or secteur_lbl or dname
+        if info_doors:
+            mq.pub(f"doors/{did}/name", dname)
+            if zone_lbl:
+                mq.pub(f"doors/{did}/zone", zone_lbl)
+            if secteur_lbl:
+                mq.pub(f"doors/{did}/secteur", secteur_lbl)
         state = SPCClient.door_state(d)
-        if state >= 0:
+        if state >= 0 and info_doors:
             last_door_state[did] = state
             mq.pub(f"doors/{did}/state", state)
         drs = SPCClient.door_drs(d)
-        if drs >= 0:
+        if drs >= 0 and info_doors:
             last_door_drs[did] = drs
             mq.pub(f"doors/{did}/drs", drs)
+
+    for output in snap.get("outputs", []):
+        oid = SPCClient.output_id(output)
+        oname = SPCClient.output_name(output)
+        if not oid:
+            continue
+        output_names[oid] = oname or output_names.get(oid) or f"Sortie {oid}"
+        if not info_outputs:
+            continue
+        if oname:
+            mq.pub(f"outputs/{oid}/name", oname)
+        state = SPCClient.output_state(output)
+        if isinstance(state, int) and state >= 0:
+            last_output_state[oid] = state
+            mq.pub(f"outputs/{oid}/state", state)
+        state_txt = SPCClient.output_state_txt(output)
+        if state_txt:
+            last_output_text[oid] = state_txt
+            mq.pub(f"outputs/{oid}/state_txt", state_txt)
 
     publish_controller_sections(snap.get("controller", []))
     next_controller_publish = time.monotonic() + controller_interval
 
     print("[SPC→MQTT] État initial publié.")
 
-    command_state_labels = {
-        0: "MHS",
-        1: "MES totale",
-        2: "MES partielle A",
-        3: "MES partielle B",
-        4: "Alarme",
-    }
+    command_state_labels = dict(AREA_STATE_LABELS)
+    command_state_labels[1] = "MES totale"
 
     def _normalize_area_token(token: str) -> str:
         tok = (token or "").strip()
@@ -1164,6 +1292,19 @@ def main() -> None:
             return str(int(low[4:]))
         if low.startswith("z") and low[1:].isdigit():
             return str(int(low[1:]))
+        if tok.isdigit():
+            return str(int(tok))
+        return tok
+
+    def _normalize_output_token(token: str) -> str:
+        tok = (token or "").strip()
+        if not tok:
+            return ""
+        low = tok.lower()
+        if low.startswith("output") and low[6:].isdigit():
+            return str(int(low[6:]))
+        if low.startswith("out") and low[3:].isdigit():
+            return str(int(low[3:]))
         if tok.isdigit():
             return str(int(tok))
         return tok
@@ -1216,7 +1357,7 @@ def main() -> None:
                     status_payload = f"ok:{mode}" if mode >= 0 else "ok"
                     mq.pub(f"secteurs/{ack_id}/command_result", status_payload)
                     if log_changes:
-                        mode_label = command_state_labels.get(mode, str(mode))
+                        mode_label = result.get("mode_label") or command_state_labels.get(mode, str(mode))
                         print(f"[{tick_cmd}] ✅ Commande secteur '{label}' → {mode_label}")
                 except Exception as err:
                     mq.pub(f"secteurs/{ack_id}/command_result", f"error:{err}")
@@ -1250,18 +1391,48 @@ def main() -> None:
                         print(f"[{tick_cmd}] ❌ Commande porte '{label}' échouée: {err}")
                 continue
 
+            if cmd_type == "output":
+                output_token = target
+                ack_id = _normalize_output_token(output_token) or "unknown"
+                label = output_names.get(ack_id, ack_id)
+                try:
+                    result = spc.send_output_command(output_token, payload)
+                    ack_id = str(result.get("output_id") or ack_id or "unknown")
+                    label = result.get("label") or output_names.get(ack_id, ack_id)
+                    if ack_id:
+                        output_names[ack_id] = label
+                    action_code = str(result.get("action") or "").strip()
+                    action_label = result.get("action_label") or action_code or payload
+                    status_payload = f"ok:{action_code}" if action_code else "ok"
+                    ack_topic_id = ack_id or "unknown"
+                    mq.pub(f"outputs/{ack_topic_id}/command_result", status_payload)
+                    if log_changes:
+                        print(f"[{tick_cmd}] ✅ Commande sortie '{label}' → {action_label}")
+                except Exception as err:
+                    ack_topic_id = ack_id or "unknown"
+                    mq.pub(f"outputs/{ack_topic_id}/command_result", f"error:{err}")
+                    if log_changes:
+                        print(f"[{tick_cmd}] ❌ Commande sortie '{label}' échouée: {err}")
+                continue
+
             if log_changes:
                 print(f"[{tick_cmd}] ⚠️ Commande inconnue ignorée: {item}")
         return handled
 
+
     while running:
-        commands_before = process_commands()
+        iteration_start = time.monotonic()
+        commands_processed = bool(process_commands())
         tick = time.strftime("%H:%M:%S")
         try:
             data = spc.fetch()
         except Exception as e:
             print(f"[SPC] fetch ERR: {e}")
-            time.sleep(interval)
+            if not commands_processed:
+                elapsed = time.monotonic() - iteration_start
+                sleep_time = interval - elapsed
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
             continue
 
         record_area_names(data.get("areas", []))
@@ -1272,15 +1443,16 @@ def main() -> None:
             if not zid or not zname:
                 continue
             zone_names[zid] = zname
-            b = SPCClient.zone_bin(z)
-            if b not in (0, 1):
+            if not info_zones:
                 continue
-            old = last_z.get(zid)
-            if old is None or b != old:
-                mq.pub(f"zones/{zid}/state", b)
-                last_z[zid] = b
-                if log_changes:
-                    print(f"[{tick}] 🟡 Zone '{zname}' → {b}")
+            b = SPCClient.zone_bin(z)
+            if b in (0, 1):
+                old = last_z.get(zid)
+                if old is None or b != old:
+                    mq.pub(f"zones/{zid}/state", b)
+                    last_z[zid] = b
+                    if log_changes:
+                        print(f"[{tick}] 🟡 Zone '{zname}' → {b}")
 
             entree = SPCClient.zone_input(z)
             if entree in (0, 1, 2, 3):
@@ -1301,6 +1473,8 @@ def main() -> None:
             sid = SPCClient.area_id(a)
             if not sid:
                 continue
+            if not info_secteurs:
+                continue
             s = SPCClient.area_num(a)
             if s < 0:
                 continue
@@ -1309,13 +1483,7 @@ def main() -> None:
                 mq.pub(f"secteurs/{sid}/state", s)
                 last_a[sid] = s
                 if log_changes:
-                    state_txt = {
-                        0: "MHS",
-                        1: "MES",
-                        2: "MES partiel A",
-                        3: "MES partiel B",
-                        4: "Alarme",
-                    }.get(s, str(s))
+                    state_txt = AREA_STATE_LABELS.get(s, str(s))
                     print(f"[{tick}] 🔵 Secteur '{a.get('nom', sid)}' → {state_txt}")
 
         now_monotonic = time.monotonic()
@@ -1323,7 +1491,8 @@ def main() -> None:
             publish_controller_sections(data.get("controller", []), tick, log_changes)
             next_controller_publish = now_monotonic + controller_interval
 
-        commands_after = process_commands()
+        processed_after = bool(process_commands())
+        commands_processed = commands_processed or processed_after
 
         for d in data.get("doors", []):
             did = SPCClient.door_id(d)
@@ -1333,6 +1502,9 @@ def main() -> None:
             zone_lbl = SPCClient.door_zone(d)
             secteur_lbl = SPCClient.door_sector(d)
             door_names[did] = zone_lbl or secteur_lbl or dname
+
+            if not info_doors:
+                continue
 
             state = SPCClient.door_state(d)
             if state >= 0:
@@ -1361,8 +1533,48 @@ def main() -> None:
                         }.get(drs, str(drs))
                         print(f"[{tick}] 🟤 Libération porte '{dname}' → {drs_txt}")
 
-        if not commands_before and not commands_after:
-            time.sleep(interval)
+        for output in data.get("outputs", []):
+            oid = SPCClient.output_id(output)
+            if not oid:
+                continue
+            oname = SPCClient.output_name(output)
+            current_label = output_names.get(oid, "")
+            if oname:
+                output_names[oid] = oname
+            elif not current_label:
+                output_names[oid] = f"Sortie {oid}"
+            label = output_names.get(oid) or oname or oid
+
+            if not info_outputs:
+                continue
+
+            if oname and oname != current_label:
+                mq.pub(f"outputs/{oid}/name", oname)
+
+            state = SPCClient.output_state(output)
+            if isinstance(state, int) and state >= 0:
+                old_state = last_output_state.get(oid)
+                if old_state is None or state != old_state:
+                    mq.pub(f"outputs/{oid}/state", state)
+                    last_output_state[oid] = state
+                    if log_changes:
+                        state_txt = {0: "off", 1: "on"}.get(state, str(state))
+                        print(f"[{tick}] 🟥 Sortie '{label}' → {state_txt}")
+
+            state_txt = SPCClient.output_state_txt(output)
+            if state_txt:
+                old_txt = last_output_text.get(oid)
+                if old_txt != state_txt:
+                    mq.pub(f"outputs/{oid}/state_txt", state_txt)
+                    last_output_text[oid] = state_txt
+                    if log_changes:
+                        print(f"[{tick}] ⬜ Sortie '{label}' état texte → {state_txt}")
+
+        if not commands_processed:
+            elapsed = time.monotonic() - iteration_start
+            sleep_time = interval - elapsed
+            if sleep_time > 0:
+                time.sleep(sleep_time)
 
     mq.client.loop_stop()
     try:

@@ -31,6 +31,8 @@ Variables optionnelles (exportables avant exécution) :
   SPC_HOST, SPC_USER, SPC_PIN, SPC_LANG, MIN_LOGIN_INTERVAL
   MQTT_HOST, MQTT_PORT, MQTT_USER, MQTT_PASS, MQTT_BASE_TOPIC, MQTT_CLIENT_ID, MQTT_QOS, MQTT_RETAIN
   WD_REFRESH, WD_CONTROLLER_REFRESH, WD_LOG_CHANGES
+  WD_INFO_ZONES, WD_INFO_SECTEURS, WD_INFO_DOORS, WD_INFO_OUTPUTS
+  WD_CTRL_ZONES, WD_CTRL_SECTEURS, WD_CTRL_DOORS, WD_CTRL_OUTPUTS
 EOF
 }
 
@@ -87,6 +89,78 @@ ensure_controller_refresh_config() {
 
   mv "$tmp" "$CFG_FILE"
   chmod 640 "$CFG_FILE"
+}
+
+ensure_watchdog_feature_flags() {
+  [[ -f "$CFG_FILE" ]] || return 0
+
+  local result
+  result="$(python3 - "$CFG_FILE" <<'PY' 2>/dev/null)
+import sys
+
+try:
+    import yaml
+except Exception:
+    sys.exit(0)
+
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+except FileNotFoundError:
+    sys.exit(0)
+
+changed = False
+if not isinstance(data, dict):
+    data = {}
+    changed = True
+
+watchdog = data.get("watchdog")
+if not isinstance(watchdog, dict):
+    watchdog = {}
+    data["watchdog"] = watchdog
+    changed = True
+
+changed_flag = [changed]
+
+def ensure_section(name: str) -> None:
+    section = watchdog.get(name)
+    if not isinstance(section, dict):
+        section = {}
+        watchdog[name] = section
+        changed_flag[0] = True
+    for key in ("zones", "secteurs", "doors", "outputs"):
+        if key not in section:
+            section[key] = True
+            changed_flag[0] = True
+
+ensure_section("information")
+ensure_section("controle")
+
+if changed_flag[0]:
+    with open(path, "w", encoding="utf-8") as fh:
+        yaml.safe_dump(
+            data,
+            fh,
+            allow_unicode=True,
+            default_flow_style=False,
+            sort_keys=False,
+        )
+    print("UPDATED", end="")
+else:
+    print("UNCHANGED", end="")
+PY
+)
+
+  local status=$?
+  if [[ $status -ne 0 ]]; then
+    result=""
+  fi
+
+  if [[ "$result" == "UPDATED" ]]; then
+    echo -e "${C_GREEN}>>> Mise à jour config: ajout watchdog.information/controle${C_RESET}"
+    chmod 640 "$CFG_FILE"
+  fi
 }
 
 echo -e "${C_GREEN}>>> Vérification des paquets système...${C_RESET}"
@@ -167,6 +241,16 @@ if [[ "${MODE}" == "--install" ]]; then
     WD_CONTROLLER_REFRESH_DEFAULT="${WD_CONTROLLER_REFRESH:-60}"
     WD_LOG_DEFAULT="${WD_LOG_CHANGES:-true}"
 
+    WD_INFO_ZONES_DEFAULT="${WD_INFO_ZONES:-true}"
+    WD_INFO_SECTEURS_DEFAULT="${WD_INFO_SECTEURS:-true}"
+    WD_INFO_DOORS_DEFAULT="${WD_INFO_DOORS:-true}"
+    WD_INFO_OUTPUTS_DEFAULT="${WD_INFO_OUTPUTS:-true}"
+
+    WD_CTRL_ZONES_DEFAULT="${WD_CTRL_ZONES:-true}"
+    WD_CTRL_SECTEURS_DEFAULT="${WD_CTRL_SECTEURS:-true}"
+    WD_CTRL_DOORS_DEFAULT="${WD_CTRL_DOORS:-true}"
+    WD_CTRL_OUTPUTS_DEFAULT="${WD_CTRL_OUTPUTS:-true}"
+
     SPC_SCHEME="$(ask "Protocole de la centrale (http/https)" "$SPC_SCHEME_DEFAULT")"
     SPC_SCHEME="${SPC_SCHEME,,}"
     if [[ ! "${SPC_SCHEME}" =~ ^https?$ ]]; then
@@ -221,6 +305,16 @@ watchdog:
   refresh_interval: ${WD_REFRESH}
   controller_refresh_interval: ${WD_CONTROLLER_REFRESH}
   log_changes: ${WD_LOG_CHANGES}
+  information:
+    zones: ${WD_INFO_ZONES_DEFAULT}
+    secteurs: ${WD_INFO_SECTEURS_DEFAULT}
+    doors: ${WD_INFO_DOORS_DEFAULT}
+    outputs: ${WD_INFO_OUTPUTS_DEFAULT}
+  controle:
+    zones: ${WD_CTRL_ZONES_DEFAULT}
+    secteurs: ${WD_CTRL_SECTEURS_DEFAULT}
+    doors: ${WD_CTRL_DOORS_DEFAULT}
+    outputs: ${WD_CTRL_OUTPUTS_DEFAULT}
 YAML
     chmod 640 "$CFG_FILE"
   else
@@ -229,6 +323,7 @@ YAML
 fi
 
 ensure_controller_refresh_config
+ensure_watchdog_feature_flags
 
 # --- Installation des scripts (copie) ---
 echo -e "${C_GREEN}>>> Installation des scripts${C_RESET}"
