@@ -8,6 +8,9 @@ from http.cookiejar import MozillaCookieJar
 from urllib.parse import urljoin
 import yaml
 
+HTTP_TIMEOUT_SEC = 8
+FETCH_RELOGIN_ATTEMPTS = 1
+
 def load_cfg(path: str):
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
@@ -58,7 +61,7 @@ class SPCClient:
         headers = {}
         if referer:
             headers["Referer"] = referer
-        r = self.session.get(url, timeout=8, headers=headers, allow_redirects=True)
+        r = self.session.get(url, timeout=HTTP_TIMEOUT_SEC, headers=headers, allow_redirects=True)
         r.raise_for_status()
         r.encoding = "utf-8"
         return r
@@ -67,7 +70,7 @@ class SPCClient:
         headers = {}
         if referer:
             headers["Referer"] = referer
-        r = self.session.post(url, data=data, allow_redirects=allow_redirects, timeout=8, headers=headers)
+        r = self.session.post(url, data=data, allow_redirects=allow_redirects, timeout=HTTP_TIMEOUT_SEC, headers=headers)
         r.raise_for_status()
         r.encoding = "utf-8"
         return r
@@ -997,75 +1000,37 @@ class SPCClient:
             r = self._get(url, referer=referer)
             return sid, r
 
-        sid, r_z = _fetch("status_zones", referer_page="status_zones")
-        logging.debug("Requesting zones from: %s (len=%d)", r_z.url, len(r_z.text))
-        zones = self.parse_zones(r_z.text)
-        if len(zones) == 0 and self._is_login_response(r_z.text, getattr(r_z, "url", ""), True):
-            logging.debug("Zones parse empty + looks like login — re-login once")
-            self._reset_session_state()
-            new_sid = self._do_login()
-            if new_sid:
+        def _fetch_parsed(page: str, referer_page: str, parse_fn, label: str):
+            nonlocal sid
+            _, response = _fetch(page, referer_page=referer_page)
+            logging.debug("Requesting %s from: %s (len=%d)", label, response.url, len(response.text))
+            parsed = parse_fn(response.text)
+            tries = 0
+            while (
+                len(parsed) == 0
+                and self._is_login_response(response.text, getattr(response, "url", ""), True)
+                and tries < FETCH_RELOGIN_ATTEMPTS
+            ):
+                tries += 1
+                logging.debug("%s parse empty + looks like login — re-login attempt %d/%d", label.capitalize(), tries, FETCH_RELOGIN_ATTEMPTS)
+                self._reset_session_state()
+                new_sid = self._do_login()
+                if not new_sid:
+                    break
                 sid = new_sid
-                r_z = self._get(f"{self.host}/secure.htm?session={sid}&page=status_zones",
-                                 referer=f"{self.host}/secure.htm?session={sid}&page=status_zones")
-                zones = self.parse_zones(r_z.text)
-                logging.debug("zones retry length: %d — parsed: %d", len(r_z.text), len(zones))
+                response = self._get(
+                    f"{self.host}/secure.htm?session={sid}&page={page}",
+                    referer=f"{self.host}/secure.htm?session={sid}&page={referer_page}",
+                )
+                parsed = parse_fn(response.text)
+                logging.debug("%s retry length: %d — parsed: %d", label, len(response.text), len(parsed))
+            return parsed
 
-        sid, r_a = _fetch("system_summary", referer_page="controller_status")
-        logging.debug("Requesting areas from: %s (len=%d)", r_a.url, len(r_a.text))
-        areas = self.parse_areas(r_a.text)
-        if len(areas) == 0 and self._is_login_response(r_a.text, getattr(r_a, "url", ""), True):
-            logging.debug("Areas parse empty + looks like login — re-login once")
-            self._reset_session_state()
-            new_sid = self._do_login()
-            if new_sid:
-                sid = new_sid
-                r_a = self._get(f"{self.host}/secure.htm?session={sid}&page=system_summary",
-                                 referer=f"{self.host}/secure.htm?session={sid}&page=controller_status")
-                areas = self.parse_areas(r_a.text)
-                logging.debug("areas retry length: %d — parsed: %d", len(r_a.text), len(areas))
-
-        sid, r_c = _fetch("controller_status", referer_page="controller_status")
-        logging.debug("Requesting controller status from: %s (len=%d)", r_c.url, len(r_c.text))
-        controller = self.parse_controller(r_c.text)
-        if len(controller) == 0 and self._is_login_response(r_c.text, getattr(r_c, "url", ""), True):
-            logging.debug("Controller parse empty + looks like login — re-login once")
-            self._reset_session_state()
-            new_sid = self._do_login()
-            if new_sid:
-                sid = new_sid
-                r_c = self._get(f"{self.host}/secure.htm?session={sid}&page=controller_status",
-                                referer=f"{self.host}/secure.htm?session={sid}&page=controller_status")
-                controller = self.parse_controller(r_c.text)
-                logging.debug("controller retry length: %d — parsed: %d", len(r_c.text), len(controller))
-
-        sid, r_d = _fetch("door_status", referer_page="controller_status")
-        logging.debug("Requesting doors from: %s (len=%d)", r_d.url, len(r_d.text))
-        doors = self.parse_doors(r_d.text)
-        if len(doors) == 0 and self._is_login_response(r_d.text, getattr(r_d, "url", ""), True):
-            logging.debug("Doors parse empty + looks like login — re-login once")
-            self._reset_session_state()
-            new_sid = self._do_login()
-            if new_sid:
-                sid = new_sid
-                r_d = self._get(f"{self.host}/secure.htm?session={sid}&page=door_status",
-                                referer=f"{self.host}/secure.htm?session={sid}&page=controller_status")
-                doors = self.parse_doors(r_d.text)
-                logging.debug("doors retry length: %d — parsed: %d", len(r_d.text), len(doors))
-
-        sid, r_o = _fetch("status_mg", referer_page="status_outputs_menu")
-        logging.debug("Requesting outputs from: %s (len=%d)", r_o.url, len(r_o.text))
-        outputs = self.parse_outputs(r_o.text)
-        if len(outputs) == 0 and self._is_login_response(r_o.text, getattr(r_o, "url", ""), True):
-            logging.debug("Outputs parse empty + looks like login — re-login once")
-            self._reset_session_state()
-            new_sid = self._do_login()
-            if new_sid:
-                sid = new_sid
-                r_o = self._get(f"{self.host}/secure.htm?session={sid}&page=status_mg",
-                                 referer=f"{self.host}/secure.htm?session={sid}&page=status_outputs_menu")
-                outputs = self.parse_outputs(r_o.text)
-                logging.debug("outputs retry length: %d — parsed: %d", len(r_o.text), len(outputs))
+        zones = _fetch_parsed("status_zones", "status_zones", self.parse_zones, "zones")
+        areas = _fetch_parsed("system_summary", "controller_status", self.parse_areas, "areas")
+        controller = _fetch_parsed("controller_status", "controller_status", self.parse_controller, "controller")
+        doors = _fetch_parsed("door_status", "controller_status", self.parse_doors, "doors")
+        outputs = _fetch_parsed("status_mg", "status_outputs_menu", self.parse_outputs, "outputs")
 
         self._save_cookies()
         self._save_session_cache(sid)
