@@ -1,20 +1,39 @@
 # ACRE SPC42 → MQTT Watchdog
 
-Ce dépôt propose un service `systemd` qui collecte l'état d'une centrale **ACRE SPC42** via son interface Web et le publie sur un broker **MQTT**. Il peut également piloter les secteurs, portes et zones exposés par la centrale.
+Ce projet fournit un service `systemd` qui :
+
+- interroge une centrale **ACRE SPC42** via l'interface Web,
+- publie les états sur **MQTT**,
+- expose des topics de **commande** (secteurs, portes, zones, sorties).
+
+---
 
 ## Sommaire
 
-1. [Installation](#installation)
-2. [Configuration](#configuration)
-3. [Mise à jour et vérifications](#mise-à-jour-et-vérifications)
-4. [Topics MQTT publiés](#topics-mqtt-publiés)
-5. [Topics MQTT de commande](#topics-mqtt-de-commande)
-6. [Service systemd](#service-systemd)
-7. [Sécurité](#sécurité)
-8. [Dépannage](#dépannage)
-9. [Désinstallation](#désinstallation)
+1. [Prérequis](#prérequis)
+2. [Installation rapide](#installation-rapide)
+3. [Configuration](#configuration)
+4. [Démarrage et vérification](#démarrage-et-vérification)
+5. [Mise à jour](#mise-à-jour)
+6. [Topics MQTT publiés](#topics-mqtt-publiés)
+7. [Topics MQTT de commande](#topics-mqtt-de-commande)
+8. [Service systemd](#service-systemd)
+9. [Sécurité](#sécurité)
+10. [Dépannage](#dépannage)
+11. [Désinstallation](#désinstallation)
 
-## Installation
+---
+
+## Prérequis
+
+- Linux avec `systemd`
+- Accès réseau à la centrale SPC
+- Broker MQTT joignable (local ou distant)
+- Droits `root` pour l’installation (scripts + service)
+
+---
+
+## Installation rapide
 
 ```bash
 cd /usr/local/src
@@ -24,16 +43,42 @@ chmod +x install.sh
 ./install.sh --install
 ```
 
+### Installation non-interactive
+
+```bash
+ASSUME_YES=true ./install.sh --install
+```
+
+Tu peux aussi injecter les variables d’environnement (SPC/MQTT) avant installation.
+
+Exemple :
+
+```bash
+SPC_HOST="https://192.168.1.100" \
+SPC_USER="Engineer" \
+SPC_PIN="1111" \
+MQTT_HOST="127.0.0.1" \
+MQTT_BASE_TOPIC="acre_maison" \
+ASSUME_YES=true \
+./install.sh --install
+```
+
+---
+
 ## Configuration
 
-Le script d'installation place un fichier `/etc/acre_exp/config.yml`. Exemple de configuration :
+Le fichier principal est :
+
+- `/etc/acre_exp/config.yml`
+
+Exemple complet :
 
 ```yaml
 spc:
   host: "https://192.168.1.100"
   user: "Engineer"
   pin: "1111"
-  language: 253            # 253 = Français, 0 = Anglais
+  language: 253
   session_cache_dir: "/var/lib/acre_exp"
   min_login_interval_sec: 60
 
@@ -48,7 +93,7 @@ mqtt:
   retain: true
 
 watchdog:
-  refresh_interval: 2.0        # secondes (float accepté, min 0.2s)
+  refresh_interval: 2.0
   controller_refresh_interval: 60.0
   log_changes: true
   information:
@@ -63,150 +108,205 @@ watchdog:
     outputs: true
 ```
 
-> ℹ️ L'adresse `spc.host` accepte indifféremment `http://` ou `https://` selon la configuration de la centrale.
-> ℹ️ Les sections `watchdog.information` et `watchdog.controle` permettent de désactiver la publication ou les commandes pour une catégorie. Les valeurs acceptent `true`/`false`, `1`/`0`, `oui`/`non`, etc.
-> ℹ️ Lorsqu'une catégorie est désactivée côté **information**, aucun topic MQTT `name`, `state`, etc. n'est publié pour celle-ci. Lorsqu'elle est désactivée côté **contrôle**, aucun abonnement `…/set` n'est ouvert et toute commande reçue renverra `error:control-disabled`.
+### Détails des paramètres
 
-## Mise à jour et vérifications
+#### `spc`
 
-### Mettre à jour le service
+- `host` : URL de la centrale (`http://` ou `https://`)
+- `user` : utilisateur SPC
+- `pin` : code PIN
+- `language` : identifiant langue SPC (`253` = FR)
+- `session_cache_dir` : dossier cache session/cookies
+- `min_login_interval_sec` : intervalle mini entre tentatives login
 
-```bash
-cd /usr/local/src/acre_exp
-chmod +x install.sh
-./install.sh --update
-```
+#### `mqtt`
 
-### Vérifier le fonctionnement
+- `host` / `port` : broker
+- `user` / `pass` : credentials (optionnel)
+- `base_topic` : racine des topics (ex: `acre_maison`)
+- `client_id` : identifiant client MQTT
+- `qos` : QoS publication (0/1/2)
+- `retain` : retain MQTT (`true`/`false`)
+
+#### `watchdog`
+
+- `refresh_interval` : période de lecture zones/secteurs/portes/sorties
+- `controller_refresh_interval` : période de lecture état centrale
+- `log_changes` : log seulement les changements significatifs
+- `information.*` : active/désactive la publication MQTT par catégorie
+- `controle.*` : active/désactive les abonnements `.../set` par catégorie
+
+---
+
+## Démarrage et vérification
+
+### Vérifier le service
 
 ```bash
 systemctl status acre-exp-watchdog.service
 journalctl -u acre-exp-watchdog.service -f -n 100
+```
+
+### Test direct du client statut
+
+```bash
 /usr/local/bin/acre_exp_status.py -c /etc/acre_exp/config.yml | jq .
+```
+
+### Écoute MQTT
+
+```bash
 mosquitto_sub -h 127.0.0.1 -t 'acre_XXX/#' -v
 ```
+
+---
+
+## Mise à jour
+
+```bash
+cd /usr/local/src/acre_exp
+git pull
+chmod +x install.sh
+./install.sh --update
+```
+
+> `--update` met à jour les scripts, les dépendances Python, puis redéploie le service.
+
+---
 
 ## Topics MQTT publiés
 
 | Topic | Description |
 | --- | --- |
-| `acre_XXX/zones/<id>/state` | 0 = zone normale, 1 = zone activée |
-| `acre_XXX/zones/<id>/entree` | 1 = entrée fermée, 0 = entrée ouverte/alarme |
-| `acre_XXX/secteurs/<id>/state` | 0 = MHS, 1 = MES totale, 2 = Nuit, 3 = MES partielle B, 4 = alarme |
-| `acre_XXX/doors/<id>/state` | 0 = porte normale/verrouillée, 1 = porte déverrouillée/accès libre, 4 = alarme |
-| `acre_XXX/doors/<id>/drs` | 0 = bouton de sortie relâché (fermé), 1 = bouton appuyé (ouvert) |
-| `acre_XXX/etat/<section>/<Libellé>` | Valeurs textuelles de l'onglet « État Centrale » |
-| `acre_XXX/outputs/<id>/state` | 0 = sortie à l'arrêt, 1 = sortie activée |
-| `acre_XXX/outputs/<id>/state_txt` | Texte brut (« On », « Off », …) affiché sur la page Intéraction Logique |
+| `acre_XXX/zones/<id>/state` | 0 = normale, 1 = active/alarme |
+| `acre_XXX/zones/<id>/entree` | 1 = fermée, 0 = ouverte/alarme |
+| `acre_XXX/secteurs/<id>/state` | 0 = MHS, 1 = MES totale, 2 = Nuit/partielle A, 3 = partielle B, 4 = alarme |
+| `acre_XXX/doors/<id>/state` | 0 = normal/verrouillée, 1 = déverrouillée, 4 = alarme |
+| `acre_XXX/doors/<id>/drs` | 0 = bouton sortie relâché, 1 = bouton appuyé |
+| `acre_XXX/outputs/<id>/state` | 0 = OFF, 1 = ON |
+| `acre_XXX/outputs/<id>/state_txt` | Texte brut SPC (On/Off/...) |
+| `acre_XXX/etat/<section>/<libellé>` | Valeurs textuelles "État Centrale" |
 
-> ℹ️ Les topics `name`, `zone` et `secteur` sont également publiés pour chaque porte (`doors/<id>/…`).
-> ℹ️ L’identifiant `0` dans `secteurs/0/state` représente le statut global « Tous Secteurs » lu sur la page *État du système*.
+---
 
 ## Topics MQTT de commande
 
+Toutes les commandes publient un accusé sur :
+
+- `.../command_result`
+
+Format :
+
+- succès : `ok:<code>`
+- erreur : `error:<raison>`
+
 ### Secteurs
 
-Publier sur `acre_XXX/secteurs/<id>/set` (ou `0` pour *Tous Secteurs*). Charges utiles acceptées :
+Topic : `acre_XXX/secteurs/<id>/set`
 
-| Valeur | Action |
-| --- | --- |
-| `0`, `mhs` | Mise Hors Service |
-| `1`, `mes` | Mise En Service totale |
-| `2`, `part`, `nuit` | Bouton « Nuit » (Mise En Service partielle A) |
-| `3`, `partb` | Mise En Service partielle B |
+Payloads acceptés :
 
-Un accusé est publié sur `acre_XXX/secteurs/<id>/command_result` (`ok:<code>` ou `error:…`). Les codes `ok` correspondent à `state` (0 à 3).
+- `0`, `mhs`
+- `1`, `mes`
+- `2`, `part`, `nuit`
+- `3`, `partb`
 
 ### Portes
 
-Publier sur `acre_XXX/doors/<id>/set`. Charges utiles acceptées :
+Topic : `acre_XXX/doors/<id>/set`
 
-| Valeur | Action |
-| --- | --- |
-| `normal` | Bouton **Normal** |
-| `lock` | Bouton **Verrouiller** |
-| `unlock` | Bouton **Déverrouiller** |
-| `pulse` | Bouton **Impulsion** |
+Payloads acceptés :
 
-Un accusé est publié sur `acre_XXX/doors/<id>/command_result` (`ok:<action>` ou `error:…`).
+- `normal`
+- `lock`
+- `unlock`
+- `pulse`
 
 ### Sorties
 
-Publier sur `acre_XXX/outputs/<id>/set`. Charges utiles acceptées :
+Topic : `acre_XXX/outputs/<id>/set`
 
-| Valeur | Action |
-| --- | --- |
-| `1`, `on` | Bouton **ON** |
-| `0`, `off` | Bouton **Off** |
+Payloads acceptés :
 
-Un accusé est publié sur `acre_XXX/outputs/<id>/command_result` (`ok:<action>` ou `error:…`).
+- `1`, `on`
+- `0`, `off`
 
 ### Zones
 
-Publier sur `acre_XXX/zones/<id>/set`. Charges utiles acceptées :
+Topic : `acre_XXX/zones/<id>/set`
 
-| Valeur | Action |
-| --- | --- |
-| `inhibit` | Bouton **Inhiber** |
-| `uninhibit` | Bouton **Dé-Inhiber** |
-| `isolate` | Bouton **Isoler** |
-| `unisolate` | Bouton **Dé-Isoler** |
-| `testjdb` | Bouton **TestJDB** |
-| `restore` | Bouton **Restaurer** |
+Payloads acceptés :
 
-Un accusé est publié sur `acre_XXX/zones/<id>/command_result` (`ok:<action>` ou `error:…`).
+- `inhibit`
+- `uninhibit`
+- `isolate`
+- `unisolate`
+- `testjdb`
+- `restore`
+
+---
 
 ## Service systemd
 
-```ini
-[Unit]
-Description=ACRE SPC42 -> MQTT Watchdog (zones + secteurs)
-After=network-online.target
-Wants=network-online.target
+Fichier : `/etc/systemd/system/acre-exp-watchdog.service`
 
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/acre_exp_watchdog.py -c /etc/acre_exp/config.yml
-Restart=always
-RestartSec=3
-User=root
-Group=root
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-ProtectHome=true
-ProtectKernelModules=true
-ProtectKernelTunables=true
-ProtectControlGroups=true
-LockPersonality=true
-MemoryDenyWriteExecute=true
-CapabilityBoundingSet=
-AmbientCapabilities=
-ReadWritePaths=/var/lib/acre_exp /etc/acre_exp
+Commandes utiles :
 
-[Install]
-WantedBy=multi-user.target
+```bash
+systemctl daemon-reload
+systemctl enable acre-exp-watchdog.service
+systemctl restart acre-exp-watchdog.service
+systemctl status acre-exp-watchdog.service
 ```
 
+---
+
 ## Sécurité
+
+Limiter les permissions du fichier de config :
 
 ```bash
 chmod 640 /etc/acre_exp/config.yml
 ```
 
+Recommandations :
+
+- utiliser un utilisateur SPC dédié,
+- isoler le broker MQTT sur VLAN/ACL,
+- éviter l’exposition WAN directe de la centrale.
+
+---
+
 ## Dépannage
 
+### Logs
+
 ```bash
-# Corriger les fichiers Windows CRLF
+journalctl -u acre-exp-watchdog.service -n 200 --no-pager
+```
+
+### Vérifier les dépendances venv
+
+```bash
+/opt/spc-venv/bin/pip list
+```
+
+### Forcer une réinstallation propre
+
+```bash
+cd /usr/local/src/acre_exp
+git fetch --all
+./install.sh --update
+```
+
+### Corriger un dépôt cloné avec fins de ligne Windows
+
+```bash
 perl -0777 -i -pe 's/\x0D\x0A/\x0A/g; s/\A\xEF\xBB\xBF//' install.sh
 bash ./install.sh --update
-
-# Voir les logs systemd
-journalctl -u acre-exp-watchdog.service -n 200 --no-pager
-
-# Tester MQTT
-mosquitto_sub -v -t 'acre_XXX/#'
 ```
+
+---
 
 ## Désinstallation
 

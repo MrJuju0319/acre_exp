@@ -1,12 +1,9 @@
 #!/opt/spc-venv/bin/python3
 # -*- coding: utf-8 -*-
 
-import os, re, sys, time, argparse, signal, logging, warnings
+import re, sys, time, argparse, signal, logging, warnings
 import queue
 import yaml
-import requests
-from bs4 import BeautifulSoup
-from http.cookiejar import MozillaCookieJar
 from typing import Dict, Set, Optional
 
 from acre_exp_status import SPCClient as StatusSPCClient
@@ -163,29 +160,6 @@ class SPCClient(StatusSPCClient):
         if self._last_login_too_recent():
             time.sleep(2)
         return self._do_login()
-
-    @staticmethod
-    def _extract_session(text_or_url):
-        if not text_or_url:
-            return ""
-        m = re.search(r"[?&]session=([0-9A-Za-zx]+)", text_or_url)
-        if m:
-            return m.group(1)
-        m = re.search(r"secure\.htm\?[^\"'>]*session=([0-9A-Za-zx]+)", text_or_url)
-        return m.group(1) if m else ""
-
-    @staticmethod
-    def _is_login_response(resp_text: str, resp_url: str, expect_table: bool) -> bool:
-        if resp_url and "login.htm" in resp_url.lower():
-            return True
-        if not expect_table:
-            return False
-        low = resp_text.lower()
-        has_user = ('name="userid"' in low) or ('id="userid"' in low) or ("id='userid'" in low)
-        has_pass = ('name="password"' in low) or ('id="password"' in low) or ("id='password'" in low)
-        if has_user and has_pass:
-            return True
-        return "utilisateur déconnecté" in low
 
     @staticmethod
     def _normalize_state_text(txt: str) -> str:
